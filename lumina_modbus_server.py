@@ -55,7 +55,7 @@ class LuminaModbusServer:
                 response = b''
                 try:
                     # Initial read with a longer timeout
-                    response = await asyncio.wait_for(reader.read(expected_length), timeout=0.5)
+                    response = await asyncio.wait_for(reader.read(expected_length), timeout=1)
                     
                     # If we got less than expected, try to read more
                     if len(response) < expected_length:
