@@ -89,7 +89,21 @@ class LuminaModbusServer:
         if actual_length != expected_length:
             logger.warning(f"Port {port} - Received {actual_length} bytes, expected {expected_length}")
         logger.info(f"Port {port} - Preparing response: {format_bytes(response)}")
+        
+        # Close the serial connection after receiving the response
+        await self.close_serial_connection(port)
+        
         return response
+
+    async def close_serial_connection(self, port):
+        if port in self.serial_connections:
+            _, writer = self.serial_connections[port]
+            writer.close()
+            await writer.wait_closed()
+            del self.serial_connections[port]
+            del self.command_queues[port]
+            del self.response_queues[port]
+            logger.info(f"Closed serial connection on port {port}")
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -108,16 +122,8 @@ class LuminaModbusServer:
                 
                 logger.debug(f"Client {addr} - Received command: port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
                 
-                if port not in self.serial_connections:
-                    await self.create_serial_connection(port, baud_rate)
-                else:
-                    current_baud_rate = self.serial_connections[port][1].transport.serial.baudrate
-                    if current_baud_rate != baud_rate:
-                        logger.info(f"Port {port} - Updating baud rate from {current_baud_rate} to {baud_rate}")
-                        old_reader, old_writer = self.serial_connections[port]
-                        old_writer.close()
-                        await old_writer.wait_closed()
-                        await self.create_serial_connection(port, baud_rate)
+                # Always create a new serial connection for each command
+                await self.create_serial_connection(port, baud_rate)
                 
                 command_bytes = bytes.fromhex(command)
                 response = await self.send_command(port, command_bytes, response_length)
