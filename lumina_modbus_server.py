@@ -76,12 +76,9 @@ class LuminaModbusServer:
         if isinstance(command, bytearray):
             command = bytes(command)
         
-        # Calculate CRC16 and append it to the command
-        crc = self.calculate_crc16(bytearray(command), high_byte_first=True)
-        command_with_crc = command + crc
-
-        logger.info(f"Sending command to port {port}:\n{format_bytes(command_with_crc)}")
-        await self.command_queues[port].put(command_with_crc)
+        # Remove CRC calculation as it's now handled on the client side
+        logger.info(f"Sending command to port {port}:\n{format_bytes(command)}")
+        await self.command_queues[port].put(command)
         response = await self.response_queues[port].get()
         if response:
             logger.info(f"Preparing to send response to client from port {port}:\n{format_bytes(response[:response_length])}")
@@ -93,42 +90,50 @@ class LuminaModbusServer:
         addr = writer.get_extra_info('peername')
         logger.info(f"New client connected: {addr}")
         
-        while True:
-            data = await reader.read(100)
-            if not data:
-                break
-            
-            message = data.decode()
-            port, baud_rate, command, response_length = message.split(':', 3)
-            baud_rate = int(baud_rate)
-            response_length = int(response_length)
-            
-            logger.info(f"Received command from {addr}: port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
-            
-            if port not in self.serial_connections:
-                await self.create_serial_connection(port, baud_rate)
-            elif self.serial_connections[port][1].baudrate != baud_rate:
-                logger.info(f"Updating baud rate for port {port} from {self.serial_connections[port][1].baudrate} to {baud_rate}")
-                # Close existing connection and create a new one with updated baud rate
-                old_reader, old_writer = self.serial_connections[port]
-                old_writer.close()
-                await old_writer.wait_closed()
-                await self.create_serial_connection(port, baud_rate)
-            
-            response = await self.send_command(port, bytes.fromhex(command), response_length)
-            
-            if response:
-                logger.info(f"Sending response to {addr}: {response.hex()}")
-                writer.write(response.hex().encode())
-                await writer.drain()
-            else:
-                logger.warning(f"Sending empty response to {addr}")
-                writer.write(b'')
-                await writer.drain()
-
-        logger.info(f"Client disconnected: {addr}")
-        writer.close()
-        await writer.wait_closed()
+        try:
+            while True:
+                data = await reader.read(100)
+                if not data:
+                    break
+                
+                message = data.decode()
+                port, baud_rate, command, response_length = message.split(':', 3)
+                baud_rate = int(baud_rate)
+                response_length = int(response_length)
+                
+                logger.info(f"Received command from {addr}: port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
+                
+                if port not in self.serial_connections:
+                    await self.create_serial_connection(port, baud_rate)
+                else:
+                    # Check if we need to update the baud rate
+                    current_baud_rate = self.serial_connections[port][1].transport.serial.baudrate
+                    if current_baud_rate != baud_rate:
+                        logger.info(f"Updating baud rate for port {port} from {current_baud_rate} to {baud_rate}")
+                        # Close existing connection and create a new one with updated baud rate
+                        old_reader, old_writer = self.serial_connections[port]
+                        old_writer.close()
+                        await old_writer.wait_closed()
+                        await self.create_serial_connection(port, baud_rate)
+                
+                # Convert the command from hex string to bytes
+                command_bytes = bytes.fromhex(command)
+                response = await self.send_command(port, command_bytes, response_length)
+                
+                if response:
+                    logger.info(f"Sending response to {addr}: {response.hex()}")
+                    writer.write(response.hex().encode())
+                    await writer.drain()
+                else:
+                    logger.warning(f"Sending empty response to {addr}")
+                    writer.write(b'')
+                    await writer.drain()
+        except Exception as e:
+            logger.error(f"Error handling client {addr}: {str(e)}")
+        finally:
+            logger.info(f"Client disconnected: {addr}")
+            writer.close()
+            await writer.wait_closed()
 
     async def run(self):
         self.running = True
@@ -142,26 +147,26 @@ class LuminaModbusServer:
             await server.serve_forever()
             
     ### CRC16 Calculation
-    @staticmethod
-    def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
-        crc = 0xFFFF
-        for byte in data:
-            crc ^= byte
-            for _ in range(8):
-                if crc & 1:
-                    crc = (crc >> 1) ^ 0xA001
-                else:
-                    crc >>= 1
+    # @staticmethod
+    # def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
+    #     crc = 0xFFFF
+    #     for byte in data:
+    #         crc ^= byte
+    #         for _ in range(8):
+    #             if crc & 1:
+    #                 crc = (crc >> 1) ^ 0xA001
+    #             else:
+    #                 crc >>= 1
 
-        # Splitting the CRC into high and low bytes
-        high_byte = crc & 0xFF
-        low_byte = (crc >> 8) & 0xFF
+    #     # Splitting the CRC into high and low bytes
+    #     high_byte = crc & 0xFF
+    #     low_byte = (crc >> 8) & 0xFF
 
-        # Returning the CRC in the specified byte order
-        if high_byte_first:
-            return bytearray([high_byte, low_byte])
-        else:
-            return bytearray([low_byte, high_byte])
+    #     # Returning the CRC in the specified byte order
+    #     if high_byte_first:
+    #         return bytearray([high_byte, low_byte])
+    #     else:
+    #         return bytearray([low_byte, high_byte])
 
 # Run the server when the script is executed directly
 if __name__ == "__main__":
