@@ -47,22 +47,34 @@ class LuminaModbusServer:
         reader, writer = self.serial_connections[port]
         while True:
             try:
-                command = await self.command_queues[port].get()
+                command, expected_length = await self.command_queues[port].get()
                 logger.info(f"Port {port} - Writing command: {format_bytes(command)}")
                 writer.write(command)
                 await writer.drain()
                 
+                response = b''
                 try:
-                    response = await asyncio.wait_for(reader.read(100), timeout=0.2)
+                    # Initial read with a longer timeout
+                    response = await asyncio.wait_for(reader.read(expected_length), timeout=0.5)
+                    
+                    # If we got less than expected, try to read more
+                    if len(response) < expected_length:
+                        remaining = expected_length - len(response)
+                        extra = await asyncio.wait_for(reader.read(remaining), timeout=0.5)
+                        response += extra
+                    
                     logger.info(f"Port {port} - Received response: {format_bytes(response)}")
-                    await self.response_queues[port].put(response)
                 except asyncio.TimeoutError:
-                    logger.warning(f"Port {port} - Timeout waiting for response")
-                    await self.response_queues[port].put(b'')
+                    if response:
+                        logger.warning(f"Port {port} - Partial response received before timeout: {format_bytes(response)}")
+                    else:
+                        logger.warning(f"Port {port} - Timeout waiting for response")
+                
+                await self.response_queues[port].put(response)
             except Exception as e:
                 logger.error(f"Port {port} - Error processing command: {e}")
 
-    async def send_command(self, port, command, response_length):
+    async def send_command(self, port, command, expected_length):
         if port not in self.serial_connections:
             raise ValueError(f"Port {port} is not initialized")
         
@@ -70,14 +82,14 @@ class LuminaModbusServer:
             command = bytes(command)
         
         logger.debug(f"Port {port} - Sending command: {format_bytes(command)}")
-        await self.command_queues[port].put(command)
+        await self.command_queues[port].put((command, expected_length))
         response = await self.response_queues[port].get()
         
-        if response:
-            logger.debug(f"Port {port} - Preparing response: {format_bytes(response[:response_length])}")
-        else:
-            logger.warning(f"Port {port} - No response received")
-        return response[:response_length]
+        actual_length = len(response)
+        if actual_length != expected_length:
+            logger.warning(f"Port {port} - Received {actual_length} bytes, expected {expected_length}")
+        logger.info(f"Port {port} - Preparing response: {format_bytes(response)}")
+        return response
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
