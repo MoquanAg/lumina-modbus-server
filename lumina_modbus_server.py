@@ -37,11 +37,10 @@ class LuminaModbusServer:
                 self.serial_connections[port] = (reader, writer)
                 self.command_queues[port] = asyncio.Queue()
                 self.response_queues[port] = asyncio.Queue()
-                # Add this line:
                 asyncio.create_task(self.process_commands(port))
-                logging.info(f"Serial connection established on port {port} with baud rate {baud_rate}")
+                logger.info(f"Serial connection established on port {port} with baud rate {baud_rate}")
             except Exception as e:
-                logging.error(f"Failed to create serial connection on port {port}: {str(e)}")
+                logger.error(f"Failed to create serial connection on port {port}: {e}")
                 raise
 
     async def process_commands(self, port):
@@ -49,41 +48,35 @@ class LuminaModbusServer:
         while True:
             try:
                 command = await self.command_queues[port].get()
-                logger.info(f"Writing command to port {port}:\n{format_bytes(command)}")
+                logger.info(f"Port {port} - Writing command: {format_bytes(command)}")
                 writer.write(command)
                 await writer.drain()
-                logger.info(f"Command written to port {port}, waiting for response...")
                 
-                # Add a timeout for reading the response
                 try:
-                    start_time = asyncio.get_event_loop().time()
-                    response = await asyncio.wait_for(reader.read(100), timeout=0.5)  # Increased buffer size and timeout
-                    end_time = asyncio.get_event_loop().time()
-                    logger.info(f"Received response from port {port} in {end_time - start_time:.5f} seconds:\n{format_bytes(response)}")
+                    response = await asyncio.wait_for(reader.read(100), timeout=0.2)
+                    logger.info(f"Port {port} - Received response: {format_bytes(response)}")
                     await self.response_queues[port].put(response)
                 except asyncio.TimeoutError:
-                    end_time = asyncio.get_event_loop().time()
-                    logger.warning(f"Timeout after {end_time - start_time:.5f} seconds waiting for response from port {port}")
-                    await self.response_queues[port].put(b'')  # Put an empty response in the queue
+                    logger.warning(f"Port {port} - Timeout waiting for response")
+                    await self.response_queues[port].put(b'')
             except Exception as e:
-                logger.error(f"Error processing command on port {port}: {str(e)}")
+                logger.error(f"Port {port} - Error processing command: {e}")
 
     async def send_command(self, port, command, response_length):
         if port not in self.serial_connections:
             raise ValueError(f"Port {port} is not initialized")
         
-        # Convert bytearray to bytes if necessary
         if isinstance(command, bytearray):
             command = bytes(command)
         
-        # Remove CRC calculation as it's now handled on the client side
-        logger.info(f"Sending command to port {port}:\n{format_bytes(command)}")
+        logger.debug(f"Port {port} - Sending command: {format_bytes(command)}")
         await self.command_queues[port].put(command)
         response = await self.response_queues[port].get()
+        
         if response:
-            logger.info(f"Preparing to send response to client from port {port}:\n{format_bytes(response[:response_length])}")
+            logger.debug(f"Port {port} - Preparing response: {format_bytes(response[:response_length])}")
         else:
-            logger.warning(f"No response received from port {port}")
+            logger.warning(f"Port {port} - No response received")
         return response[:response_length]
 
     async def handle_client(self, reader, writer):
@@ -101,35 +94,31 @@ class LuminaModbusServer:
                 baud_rate = int(baud_rate)
                 response_length = int(response_length)
                 
-                logger.info(f"Received command from {addr}: port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
+                logger.debug(f"Client {addr} - Received command: port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
                 
                 if port not in self.serial_connections:
                     await self.create_serial_connection(port, baud_rate)
                 else:
-                    # Check if we need to update the baud rate
                     current_baud_rate = self.serial_connections[port][1].transport.serial.baudrate
                     if current_baud_rate != baud_rate:
-                        logger.info(f"Updating baud rate for port {port} from {current_baud_rate} to {baud_rate}")
-                        # Close existing connection and create a new one with updated baud rate
+                        logger.info(f"Port {port} - Updating baud rate from {current_baud_rate} to {baud_rate}")
                         old_reader, old_writer = self.serial_connections[port]
                         old_writer.close()
                         await old_writer.wait_closed()
                         await self.create_serial_connection(port, baud_rate)
                 
-                # Convert the command from hex string to bytes
                 command_bytes = bytes.fromhex(command)
                 response = await self.send_command(port, command_bytes, response_length)
                 
                 if response:
-                    logger.info(f"Sending response to {addr}: {response.hex()}")
+                    logger.debug(f"Client {addr} - Sending response: {response.hex()}")
                     writer.write(response.hex().encode())
-                    await writer.drain()
                 else:
-                    logger.warning(f"Sending empty response to {addr}")
+                    logger.warning(f"Client {addr} - Sending empty response")
                     writer.write(b'')
-                    await writer.drain()
+                await writer.drain()
         except Exception as e:
-            logger.error(f"Error handling client {addr}: {str(e)}")
+            logger.error(f"Error handling client {addr}: {e}")
         finally:
             logger.info(f"Client disconnected: {addr}")
             writer.close()
