@@ -44,10 +44,14 @@ class LuminaModbusServer:
                 raise
 
     async def process_commands(self, port):
-        reader, writer = self.serial_connections[port]
         while True:
             try:
-                command, expected_length = await self.command_queues[port].get()
+                if port not in self.serial_connections:
+                    logger.info(f"Port {port} - Connection closed, exiting process_commands")
+                    break
+
+                reader, writer = self.serial_connections[port]
+                command, expected_length = await asyncio.wait_for(self.command_queues[port].get(), timeout=1)
                 logger.info(f"Port {port} - Writing command: {format_bytes(command)}")
                 writer.write(command)
                 await writer.drain()
@@ -70,9 +74,22 @@ class LuminaModbusServer:
                     else:
                         logger.warning(f"Port {port} - Timeout waiting for response")
                 
-                await self.response_queues[port].put(response)
+                if port in self.response_queues:
+                    await self.response_queues[port].put(response)
+                else:
+                    logger.warning(f"Port {port} - Response queue no longer exists, discarding response")
+            except asyncio.CancelledError:
+                logger.info(f"Port {port} - Command processing cancelled")
+                break
+            except asyncio.TimeoutError:
+                logger.debug(f"Port {port} - Timeout waiting for command, continuing...")
             except Exception as e:
                 logger.error(f"Port {port} - Error processing command: {e}")
+                if port in self.response_queues:
+                    await self.response_queues[port].put(b'')  # Put an empty response to unblock waiting coroutines
+                await asyncio.sleep(1)  # Add a small delay to prevent tight looping on persistent errors
+        
+        logger.info(f"Port {port} - Exiting command processing loop")
 
     async def send_command(self, port, command, expected_length):
         if port not in self.serial_connections:
