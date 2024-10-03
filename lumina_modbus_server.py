@@ -62,19 +62,13 @@ class LuminaModbusServer:
                 start_bytes = command[:2]  # The first two bytes of the command should match the first two bytes of the response
                 try:
                     # Read until we find a byte that matches either the first or second byte of start_bytes
-                    while True:
+                    while len(response) < 2:
                         byte = await asyncio.wait_for(reader.read(1), timeout=0.2)
                         if byte in [start_bytes[0:1], start_bytes[1:2]]:
                             response += byte
                             if len(response) == 1 and byte == start_bytes[1:2]:
                                 # If we caught the second byte first, prepend with the expected first byte
                                 response = start_bytes[0:1] + response
-                            elif len(response) == 2 and response != start_bytes:
-                                # If we have two bytes but they don't match start_bytes, keep only the second byte
-                                discarded_bytes += response[0:1]
-                                response = response[1:]
-                            else:
-                                break
                         else:
                             discarded_bytes += byte
                             logger.warning(f"Port {port} - Discarding unexpected byte: {format_bytes(byte)}")
@@ -104,6 +98,9 @@ class LuminaModbusServer:
                 else:
                     logger.warning(f"Port {port} - Response queue no longer exists, discarding response")
 
+                # Purge any remaining bytes in the buffer
+                await self.purge_buffer(port)
+
             except asyncio.CancelledError:
                 logger.info(f"Port {port} - Command processing cancelled")
                 break
@@ -116,6 +113,22 @@ class LuminaModbusServer:
                 await asyncio.sleep(1)  # Add a small delay to prevent tight looping on persistent errors
         
         logger.info(f"Port {port} - Exiting command processing loop")
+
+    async def purge_buffer(self, port):
+        if port in self.serial_connections:
+            reader, _, _ = self.serial_connections[port]
+            purged_bytes = b''
+            try:
+                while True:
+                    chunk = await asyncio.wait_for(reader.read(100), timeout=0.1)
+                    if not chunk:
+                        break
+                    purged_bytes += chunk
+            except asyncio.TimeoutError:
+                pass  # No more data to read
+            
+            if purged_bytes:
+                logger.info(f"Port {port} - Purged {len(purged_bytes)} bytes: {format_bytes(purged_bytes)}")
 
     async def send_command(self, port, command, expected_length):
         if port not in self.serial_connections:
