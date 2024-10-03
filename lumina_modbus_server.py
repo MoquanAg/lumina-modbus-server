@@ -101,6 +101,11 @@ class LuminaModbusServer:
                 # Purge any remaining bytes in the buffer
                 await self.purge_buffer(port)
 
+                # Add a small delay between frames to respect the 3.5 character time
+                baud_rate = self.serial_connections[port][2]
+                frame_delay = max(0.00175, 3.5 * 10 / baud_rate)  # 3.5 character times, minimum 1.75ms
+                await asyncio.sleep(frame_delay)
+                
             except asyncio.CancelledError:
                 logger.info(f"Port {port} - Command processing cancelled")
                 break
@@ -248,26 +253,26 @@ class LuminaModbusServer:
             await server.serve_forever()
             
     ### CRC16 Calculation
-    # @staticmethod
-    # def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
-    #     crc = 0xFFFF
-    #     for byte in data:
-    #         crc ^= byte
-    #         for _ in range(8):
-    #             if crc & 1:
-    #                 crc = (crc >> 1) ^ 0xA001
-    #             else:
-    #                 crc >>= 1
+    @staticmethod
+    def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 1:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc >>= 1
 
-    #     # Splitting the CRC into high and low bytes
-    #     high_byte = crc & 0xFF
-    #     low_byte = (crc >> 8) & 0xFF
+        # Splitting the CRC into high and low bytes
+        high_byte = crc & 0xFF
+        low_byte = (crc >> 8) & 0xFF
 
-    #     # Returning the CRC in the specified byte order
-    #     if high_byte_first:
-    #         return bytearray([high_byte, low_byte])
-    #     else:
-    #         return bytearray([low_byte, high_byte])
+        # Returning the CRC in the specified byte order
+        if high_byte_first:
+            return bytearray([high_byte, low_byte])
+        else:
+            return bytearray([low_byte, high_byte])
 
     async def safe_write(self, writer, data):
         try:
