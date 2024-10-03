@@ -132,12 +132,24 @@ class LuminaModbusServer:
                 if not data:
                     break
                 
-                message = data.decode()
-                port, baud_rate, command, response_length = message.split(':', 3)
-                baud_rate = int(baud_rate)
-                response_length = int(response_length)
+                message = data.decode().strip()  # Strip any whitespace or newline characters
                 
-                logger.debug(f"Client {addr} - Received command: port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
+                # Handle ping messages
+                if message.endswith('ping') or message == 'ping':
+                    logger.info(f"Received ping from {addr}")
+                    writer.write(b'pong')
+                    await writer.drain()
+                    continue
+                
+                try:
+                    name, port, baud_rate, command, response_length = message.split(':', 4)
+                    baud_rate = int(baud_rate)
+                    response_length = int(response_length)
+                except ValueError as e:
+                    logger.error(f"Invalid message format from {addr}: {message}")
+                    continue  # Skip to the next iteration of the loop
+                
+                logger.info(f"{name} at {addr} - Received command: port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
                 
                 # Always create a new serial connection for each command
                 await self.create_serial_connection(port, baud_rate)
@@ -146,16 +158,16 @@ class LuminaModbusServer:
                 response = await self.send_command(port, command_bytes, response_length)
                 
                 if response:
-                    logger.debug(f"Client {addr} - Sending response: {response.hex()}")
+                    logger.info(f"To {name} at {addr} - Sending response: {response.hex()}")
                     writer.write(response.hex().encode())
                 else:
-                    logger.warning(f"Client {addr} - Sending empty response")
+                    logger.warning(f"To {name} at {addr} - Sending empty response")
                     writer.write(b'')
                 await writer.drain()
         except Exception as e:
-            logger.error(f"Error handling client {addr}: {e}")
+            logger.error(f"Error handling {name} at {addr}: {e}")
         finally:
-            logger.info(f"Client disconnected: {addr}")
+            logger.info(f"{name} at {addr} disconnected")
             writer.close()
             await writer.wait_closed()
 
