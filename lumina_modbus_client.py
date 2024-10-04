@@ -15,6 +15,8 @@ class LuminaModbusClient:
         self.observers = []  
         self.recent_commands = {}  # New attribute to store recent commands
         self.response_timeout = 5  # 5 seconds timeout for responses
+        self.command_queue = asyncio.Queue()
+        self.processing_task = None
 
     def initialize(self):
         self.reader = None
@@ -104,31 +106,73 @@ class LuminaModbusClient:
                 pass
         self.keep_alive_task = None
 
-    async def send_command(self, name, port, command, baudrate=9600, response_length=20, host='127.0.0.1', server_port=8888):
+    async def send_command(self, name, port, command, baudrate=9600, response_length=20, host='127.0.0.1', server_port=8888, timeout=None):
+        command_uuid = str(uuid.uuid4())
+        command_info = {
+            'name': name,
+            'port': port,
+            'command': command,
+            'baudrate': baudrate,
+            'response_length': response_length,
+            'host': host,
+            'server_port': server_port,
+            'uuid': command_uuid,
+            'timeout': timeout
+        }
+        
+        await self.command_queue.put(command_info)
+        
+        if self.processing_task is None or self.processing_task.done():
+            self.processing_task = asyncio.create_task(self._process_command_queue())
+
+        return command_uuid
+
+    async def _process_command_queue(self):
+        while not self.command_queue.empty():
+            command_info = await self.command_queue.get()
+            try:
+                await self._send_command(command_info)
+            except Exception as e:
+                logger.error(f"Error processing command: {e}")
+            finally:
+                self.command_queue.task_done()
+
+    async def _send_command(self, command_info):
         async with self.communication_lock:
             try:
                 if not self.is_connected:
-                    await self.connect(host, server_port)
+                    await self.connect(command_info['host'], command_info['server_port'])
                 
-                crc = self.calculate_crc16(command, high_byte_first=True)
-                command_with_crc = command + crc
+                crc = self.calculate_crc16(command_info['command'], high_byte_first=True)
+                command_with_crc = command_info['command'] + crc
 
-                command_uuid = str(uuid.uuid4())
+                message_parts = [
+                    command_info['uuid'],
+                    command_info['name'],
+                    command_info['port'],
+                    str(command_info['baudrate']),
+                    command_with_crc.hex(),
+                    str(command_info['response_length'])
+                ]
 
-                message = f"{command_uuid}:{name}:{port}:{baudrate}:{command_with_crc.hex()}:{response_length}\n"
-                logger.info(f"{name} sending command: UUID={command_uuid}, port={port}, baudrate={baudrate}, command={command_with_crc.hex()}, response_length={response_length}")
+                if command_info['timeout'] is not None:
+                    message_parts.append(str(command_info['timeout']))
+
+                message = ":".join(message_parts) + "\n"
+                
+                logger.info(f"{command_info['name']} sending command: UUID={command_info['uuid']}, "
+                            f"port={command_info['port']}, baudrate={command_info['baudrate']}, "
+                            f"command={command_with_crc.hex()}, response_length={command_info['response_length']}, "
+                            f"timeout={command_info['timeout']}")
                 
                 self.writer.write(message.encode())
                 await self.writer.drain()
 
-                # Store the command details
-                self.recent_commands[command_uuid] = {
+                self.recent_commands[command_info['uuid']] = {
                     'command': command_with_crc.hex(),
-                    'response_length': response_length,
+                    'response_length': command_info['response_length'],
                     'timestamp': time.time()
                 }
-
-                return command_uuid
 
             except Exception as e:
                 logger.error(f"Error during command execution: {str(e)}")
@@ -138,6 +182,12 @@ class LuminaModbusClient:
     async def _read_responses(self):
         while self.is_connected:
             try:
+                # Add a check for reader availability
+                if self.reader is None or self.reader.at_eof():
+                    logger.error("Reader is not available or at EOF. Attempting to reconnect...")
+                    await self._reconnect()
+                    continue
+
                 response = await asyncio.wait_for(self.reader.readuntil(b'\n'), timeout=self.response_timeout)
                 response = response.strip()
                 
@@ -148,7 +198,7 @@ class LuminaModbusClient:
                 if response_uuid in self.recent_commands:
                     command_info = self.recent_commands[response_uuid]
                     if not response_data or len(bytes.fromhex(response_data)) == command_info['response_length']:
-                        logger.info(f"Received matching response for command {response_uuid}")
+                        # logger.info(f"Received matching response for command {response_uuid}")
                         await self.notify_observers({"type": "response", "data": response})
                     del self.recent_commands[response_uuid]
                 else:
@@ -166,8 +216,14 @@ class LuminaModbusClient:
                     await self.notify_observers({"type": "timeout", "data": {"command_uuid": uuid}})
                     del self.recent_commands[uuid]
             
+            except asyncio.IncompleteReadError as e:
+                logger.error(f"IncompleteReadError: {e.partial} bytes read on a total of {e.expected} expected bytes")
+                await self._reconnect()
+
             except Exception as e:
                 logger.error(f"Error in _read_responses: {str(e)}")
+                logger.exception("Detailed traceback:")
+                await asyncio.sleep(1)  # Add a small delay before retrying
 
     # Add a new method to clean up old commands
     async def _cleanup_recent_commands(self):

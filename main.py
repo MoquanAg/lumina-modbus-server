@@ -29,6 +29,7 @@ class LuminaModbusServer:
         self.serial_connections = {}
         self.command_queues = {}
         self.response_queues = {}
+        self.port_locks = {}
         self.running = False
 
     async def create_serial_connection(self, port, baud_rate):
@@ -36,8 +37,9 @@ class LuminaModbusServer:
             try:
                 reader, writer = await serial_asyncio.open_serial_connection(url=port, baudrate=baud_rate)
                 self.serial_connections[port] = (reader, writer, baud_rate)
-                self.command_queues[port] = asyncio.Queue()
-                self.response_queues[port] = asyncio.Queue()
+                self.command_queues[port] = Queue()
+                self.response_queues[port] = Queue()
+                self.port_locks[port] = asyncio.Lock()
                 asyncio.create_task(self.process_commands(port))
                 logger.info(f"Serial connection established on port {port} with baud rate {baud_rate}")
             except Exception as e:
@@ -52,65 +54,62 @@ class LuminaModbusServer:
                     break
 
                 reader, writer, _ = self.serial_connections[port]
-                command, expected_length = await asyncio.wait_for(self.command_queues[port].get(), timeout=1)
-                logger.info(f"Port {port} - Writing command: {format_bytes(command)}")
-                writer.write(command)
-                await writer.drain()
+                command, expected_length, timeout = await self.command_queues[port].get()
                 
-                response = b''
-                discarded_bytes = b''
-                start_bytes = command[:2]  # The first two bytes of the command should match the first two bytes of the response
-                try:
-                    # Read until we find a byte that matches either the first or second byte of start_bytes
-                    while len(response) < 2:
-                        byte = await asyncio.wait_for(reader.read(1), timeout=0.2)
-                        if byte in [start_bytes[0:1], start_bytes[1:2]]:
-                            response += byte
-                            if len(response) == 1 and byte == start_bytes[1:2]:
-                                # If we caught the second byte first, prepend with the expected first byte
-                                response = start_bytes[0:1] + response
-                        else:
-                            discarded_bytes += byte
-                            logger.warning(f"Port {port} - Discarding unexpected byte: {format_bytes(byte)}")
-
-                    # Now read the rest of the expected response
-                    while len(response) < expected_length:
-                        chunk = await asyncio.wait_for(reader.read(expected_length - len(response)), timeout=0.5)
-                        if not chunk:  # No more data available
-                            break
-                        response += chunk
+                async with self.port_locks[port]:
+                    logger.info(f"Port {port} - Writing command: {format_bytes(command)}")
+                    writer.write(command)
+                    await writer.drain()
                     
-                    logger.info(f"Port {port} - Received {len(response)} bytes: {format_bytes(response)}")
-                    if discarded_bytes:
-                        logger.info(f"Port {port} - Discarded {len(discarded_bytes)} bytes: {format_bytes(discarded_bytes)}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"Port {port} - Timeout waiting for full response. Received {len(response)} bytes so far.")
-                
-                if len(response) != expected_length:
-                    logger.warning(f"Port {port} - Received {len(response)} bytes, expected {expected_length}")
-                
-                # Include discarded bytes after start bytes in the response
-                full_response = response + discarded_bytes[len(start_bytes):]
-                
-                # Always put the response in the queue, even if it's incomplete
-                if port in self.response_queues:
+                    response = b''
+                    discarded_bytes = b''
+                    start_bytes = command[:2]
+                    
+                    try:
+                        # Read until we find a byte that matches either the first or second byte of start_bytes
+                        while len(response) < 2:
+                            byte = await asyncio.wait_for(reader.read(1), timeout=0.2)
+                            if byte in [start_bytes[0:1], start_bytes[1:2]]:
+                                response += byte
+                                if len(response) == 1 and byte == start_bytes[1:2]:
+                                    response = start_bytes[0:1] + response
+                            else:
+                                discarded_bytes += byte
+                                logger.warning(f"Port {port} - Discarding unexpected byte: {format_bytes(byte)}")
+
+                        # Now read the rest of the expected response
+                        while len(response) < expected_length:
+                            chunk = await asyncio.wait_for(reader.read(expected_length - len(response)), timeout=timeout)
+                            if not chunk:  # No more data available
+                                break
+                            response += chunk
+                        
+                        logger.info(f"Port {port} - Received {len(response)} bytes: {format_bytes(response)}")
+                        if discarded_bytes:
+                            logger.info(f"Port {port} - Discarded {len(discarded_bytes)} bytes: {format_bytes(discarded_bytes)}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Port {port} - Timeout waiting for full response. Received {len(response)} bytes so far.")
+                    
+                    if len(response) != expected_length:
+                        logger.warning(f"Port {port} - Received {len(response)} bytes, expected {expected_length}")
+                    
+                    # Include discarded bytes after start bytes in the response
+                    full_response = response + discarded_bytes[len(start_bytes):]
+                    
+                    # Always put the response in the queue, even if it's incomplete
                     await self.response_queues[port].put(full_response)
-                else:
-                    logger.warning(f"Port {port} - Response queue no longer exists, discarding response")
 
-                # Purge any remaining bytes in the buffer
-                await self.purge_buffer(port)
+                    # Purge any remaining bytes in the buffer
+                    await self.purge_buffer(port)
 
-                # Add a small delay between frames to respect the 3.5 character time
-                baud_rate = self.serial_connections[port][2]
-                frame_delay = max(0.00175, 3.5 * 10 / baud_rate)  # 3.5 character times, minimum 1.75ms
-                await asyncio.sleep(frame_delay)
-                
+                    # Add a small delay between frames to respect the 3.5 character time
+                    baud_rate = self.serial_connections[port][2]
+                    frame_delay = max(0.00175, 3.5 * 10 / baud_rate)  # 3.5 character times, minimum 1.75ms
+                    await asyncio.sleep(frame_delay)
+
             except asyncio.CancelledError:
                 logger.info(f"Port {port} - Command processing cancelled")
                 break
-            except asyncio.TimeoutError:
-                logger.debug(f"Port {port} - Timeout waiting for command, continuing...")
             except Exception as e:
                 logger.error(f"Port {port} - Error processing command: {e}")
                 if port in self.response_queues:
@@ -135,16 +134,16 @@ class LuminaModbusServer:
             if purged_bytes:
                 logger.info(f"Port {port} - Purged {len(purged_bytes)} bytes: {format_bytes(purged_bytes)}")
 
-    async def send_command(self, port, command, expected_length):
+    async def send_command(self, port, command, expected_length, timeout=1.8):
         if port not in self.serial_connections:
             raise ValueError(f"Port {port} is not initialized")
         
         if isinstance(command, bytearray):
             command = bytes(command)
         
-        logger.debug(f"Port {port} - Sending command: {format_bytes(command)}")
+        logger.debug(f"Port {port} - Queueing command: {format_bytes(command)}")
         
-        await self.command_queues[port].put((command, expected_length))
+        await self.command_queues[port].put((command, expected_length, timeout))
         response = await self.response_queues[port].get()
         
         actual_length = len(response)
@@ -162,6 +161,7 @@ class LuminaModbusServer:
             del self.serial_connections[port]
             del self.command_queues[port]
             del self.response_queues[port]
+            del self.port_locks[port]  # Add this line
             logger.info(f"Closed serial connection on port {port}")
 
     async def handle_client(self, reader, writer):
@@ -169,6 +169,7 @@ class LuminaModbusServer:
         logger.info(f"New client connected: {addr}")
         
         last_activity = asyncio.get_event_loop().time()
+        default_timeout = 1.8  # Default timeout in seconds
         
         try:
             while True:
@@ -191,15 +192,24 @@ class LuminaModbusServer:
                     
                     # Handle other commands
                     try:
-                        command_uuid, name, port, baud_rate, command, response_length = message.split(':', 5)
+                        parts = message.split(':')
+                        if len(parts) == 6:
+                            command_uuid, name, port, baud_rate, command, response_length = parts
+                            timeout = default_timeout
+                        elif len(parts) == 7:
+                            command_uuid, name, port, baud_rate, command, response_length, timeout = parts
+                        else:
+                            raise ValueError("Invalid number of parameters")
+                        
                         baud_rate = int(baud_rate)
                         response_length = int(response_length)
+                        timeout = float(timeout)
                     except ValueError as e:
                         logger.error(f"Invalid message format from {addr}: {message}")
                         await self.safe_write(writer, b'ERROR: Invalid message format')
                         continue
                     
-                    logger.info(f"{name} at {addr} - Received command: UUID={command_uuid}, port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}")
+                    logger.info(f"{name} at {addr} - Received command: UUID={command_uuid}, port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}, timeout={timeout}")
                     
                     # Check if we need to create a new serial connection or use an existing one
                     if port not in self.serial_connections or self.serial_connections[port][2] != baud_rate:
@@ -208,7 +218,7 @@ class LuminaModbusServer:
                         await self.create_serial_connection(port, baud_rate)
                     
                     command_bytes = bytes.fromhex(command)
-                    response = await self.send_command(port, command_bytes, response_length)
+                    response = await self.send_command(port, command_bytes, response_length, timeout)
                     
                     if response:
                         logger.info(f"To {name} at {addr} - Sending response for UUID {command_uuid}: {response.hex()}")

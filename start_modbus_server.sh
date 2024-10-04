@@ -16,7 +16,7 @@ start_script() {
 }
 
 # Kill existing Lumina Modbus Server processes more specifically
-pkill -f "$PACKAGE_PATH/main.py"
+pkill -f "$PACKAGE_PATH/modbus_server.py"
 
 sleep 2
 
