@@ -21,6 +21,6 @@ pkill -f "$PACKAGE_PATH/modbus_server.py"
 sleep 2
 
 # Start Modbus server script
-start_script "main.py"
+start_script "modbus_server.py"
 
 echo "Lumina Modbus Server has been launched."
