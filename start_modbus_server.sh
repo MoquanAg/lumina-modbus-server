@@ -15,13 +15,12 @@ start_script() {
     '" &
 }
 
-# Kill existing Lumina Modbus Server processes
-pkill -f "$PACKAGE_PATH"
+# Kill existing Lumina Modbus Server processes more specifically
+pkill -f "$PACKAGE_PATH/main.py"
+
+sleep 2
 
 # Start Modbus server script
-start_script "lumina_modbus_server.py"
-
-# Start main logic script (if applicable)
-# start_script "main.py"
+start_script "main.py"
 
 echo "Lumina Modbus Server has been launched."

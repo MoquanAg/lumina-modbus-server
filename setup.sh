@@ -21,25 +21,19 @@ sudo -u lumina python3.11 -m venv "$VENV_PATH"
 sudo -u lumina "$VENV_PATH/bin/pip" install --upgrade pip
 sudo -u lumina "$VENV_PATH/bin/pip" install -r "$LUMINA_MODBUS/requirements.txt"
 
-# Set up systemd service for Lumina Modbus Server
-cat << EOF > /etc/systemd/system/lumina-modbus.service
-[Unit]
-Description=Lumina Modbus Server
-After=network.target
+# Create autostart entry for lxterminal
+AUTOSTART_DIR="/home/lumina/.config/autostart"
+sudo -u lumina mkdir -p "$AUTOSTART_DIR"
 
-[Service]
-ExecStart=/home/lumina/lumina-modbus-server/start_modbus_server.sh
-User=lumina
-Group=lumina
-
-[Install]
-WantedBy=multi-user.target
+cat << EOF | sudo -u lumina tee "$AUTOSTART_DIR/lumina-modbus-terminal.desktop" > /dev/null
+[Desktop Entry]
+Type=Application
+Name=Lumina Modbus Terminal
+Exec=lxterminal -e "bash -c '/home/lumina/lumina-modbus-server/start_modbus_server.sh; exec bash'"
+Terminal=false
+X-GNOME-Autostart-enabled=true
 EOF
 
-# Enable and start the systemd service
-sudo systemctl enable lumina-modbus.service
-sudo systemctl start lumina-modbus.service
-
-wait
+echo "Added lxterminal autostart entry for Lumina Modbus."
 
 echo "Setup complete."
