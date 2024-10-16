@@ -31,6 +31,8 @@ class LuminaModbusServer:
         self.response_queues = {}
         self.port_locks = {}
         self.running = False
+        self.client_response_queue = Queue()  # Add this line
+        self.client_writers = {}  # Add this line
 
     async def create_serial_connection(self, port, baud_rate):
         if port not in self.serial_connections:
@@ -54,7 +56,7 @@ class LuminaModbusServer:
                     break
 
                 reader, writer, _ = self.serial_connections[port]
-                command, expected_length, timeout = await self.command_queues[port].get()
+                command, expected_length, timeout, client_id = await self.command_queues[port].get()
                 
                 async with self.port_locks[port]:
                     logger.info(f"Port {port} - Writing command: {format_bytes(command)}")
@@ -96,8 +98,8 @@ class LuminaModbusServer:
                     # Include discarded bytes after start bytes in the response
                     full_response = response + discarded_bytes[len(start_bytes):]
                     
-                    # Always put the response in the queue, even if it's incomplete
-                    await self.response_queues[port].put(full_response)
+                    # Include client_id when putting response in the queue
+                    await self.client_response_queue.put((client_id, full_response))
 
                     # Purge any remaining bytes in the buffer
                     await self.purge_buffer(port)
@@ -112,8 +114,7 @@ class LuminaModbusServer:
                 break
             except Exception as e:
                 logger.error(f"Port {port} - Error processing command: {e}")
-                if port in self.response_queues:
-                    await self.response_queues[port].put(b'')  # Put an empty response to unblock waiting coroutines
+                await self.client_response_queue.put((client_id, b''))  # Put an empty response with client_id
                 await asyncio.sleep(1)  # Add a small delay to prevent tight looping on persistent errors
         
         logger.info(f"Port {port} - Exiting command processing loop")
@@ -134,7 +135,7 @@ class LuminaModbusServer:
             if purged_bytes:
                 logger.info(f"Port {port} - Purged {len(purged_bytes)} bytes: {format_bytes(purged_bytes)}")
 
-    async def send_command(self, port, command, expected_length, timeout=1.8):
+    async def send_command(self, port, command, expected_length, timeout=1.8, client_id=None):
         if port not in self.serial_connections:
             raise ValueError(f"Port {port} is not initialized")
         
@@ -143,15 +144,9 @@ class LuminaModbusServer:
         
         logger.debug(f"Port {port} - Queueing command: {format_bytes(command)}")
         
-        await self.command_queues[port].put((command, expected_length, timeout))
-        response = await self.response_queues[port].get()
+        await self.command_queues[port].put((command, expected_length, timeout, client_id))
         
-        actual_length = len(response)
-        if actual_length != expected_length:
-            logger.warning(f"Port {port} - Received {actual_length} bytes, expected {expected_length}")
-        logger.info(f"Port {port} - Preparing {len(response)} bytes: {format_bytes(response)}")
-        
-        return response
+        return client_id
 
     async def close_serial_connection(self, port):
         if port in self.serial_connections:
@@ -168,6 +163,8 @@ class LuminaModbusServer:
         addr = writer.get_extra_info('peername')
         logger.info(f"New client connected: {addr}")
         
+        # We'll use the command_id from the client message as the client_id
+        
         last_activity = asyncio.get_event_loop().time()
         default_timeout = 1.8  # Default timeout in seconds
         
@@ -180,7 +177,7 @@ class LuminaModbusServer:
                     
                     last_activity = asyncio.get_event_loop().time()
                     
-                    message = data.decode().strip()  # Strip any whitespace or newline characters
+                    message = data.decode().strip()
                     logger.info(f"Received message from {addr}: {message}")
                     
                     # Handle ping messages
@@ -193,23 +190,20 @@ class LuminaModbusServer:
                     # Handle other commands
                     try:
                         parts = message.split(':')
-                        if len(parts) == 6:
-                            command_uuid, name, port, baud_rate, command, response_length = parts
-                            timeout = default_timeout
-                        elif len(parts) == 7:
-                            command_uuid, name, port, baud_rate, command, response_length, timeout = parts
-                        else:
+                        if len(parts) < 6 or len(parts) > 7:
                             raise ValueError("Invalid number of parameters")
+                        
+                        command_id, name, port, baud_rate, command, response_length, *timeout = parts
                         
                         baud_rate = int(baud_rate)
                         response_length = int(response_length)
-                        timeout = float(timeout)
+                        timeout = float(timeout[0]) if timeout else default_timeout
                     except ValueError as e:
                         logger.error(f"Invalid message format from {addr}: {message}")
-                        await self.safe_write(writer, b'ERROR: Invalid message format')
+                        await self.safe_write(writer, f"{command_id}:ERROR: Invalid message format\n".encode())
                         continue
                     
-                    logger.info(f"{name} at {addr} - Received command: UUID={command_uuid}, port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}, timeout={timeout}")
+                    logger.info(f"{name} at {addr} - Received command: ID={command_id}, port={port}, baud_rate={baud_rate}, command={command}, response_length={response_length}, timeout={timeout}")
                     
                     # Check if we need to create a new serial connection or use an existing one
                     if port not in self.serial_connections or self.serial_connections[port][2] != baud_rate:
@@ -217,16 +211,14 @@ class LuminaModbusServer:
                             await self.close_serial_connection(port)
                         await self.create_serial_connection(port, baud_rate)
                     
-                    command_bytes = bytes.fromhex(command)
-                    response = await self.send_command(port, command_bytes, response_length, timeout)
+                    # Use command_id as the client_id
+                    self.client_writers[command_id] = writer
                     
-                    if response:
-                        logger.info(f"To {name} at {addr} - Sending response for UUID {command_uuid}: {response.hex()}")
-                        await self.safe_write(writer, f"{command_uuid}:{response.hex()}\n".encode())
-                    else:
-                        logger.warning(f"To {name} at {addr} - Sending empty response for UUID {command_uuid}")
-                        await self.safe_write(writer, f"{command_uuid}:\n".encode())
-                
+                    command_bytes = bytes.fromhex(command)
+                    await self.send_command(port, command_bytes, response_length, timeout, command_id)
+                    
+                    # Don't wait for response here, it will be handled by the client response handler
+
                 except asyncio.TimeoutError:
                     if asyncio.get_event_loop().time() - last_activity > 600:
                         logger.info(f"Client {addr} inactive for 10 minutes, closing connection")
@@ -236,6 +228,7 @@ class LuminaModbusServer:
                     break
                 except Exception as e:
                     logger.error(f"Error processing command from {addr}: {e}")
+                    await self.safe_write(writer, f"{command_id}:ERROR: {str(e)}\n".encode())
                     break
         
         except Exception as e:
@@ -251,6 +244,21 @@ class LuminaModbusServer:
             for port in list(self.serial_connections.keys()):
                 await self.close_serial_connection(port)
 
+    async def client_response_handler(self):
+        while True:
+            client_id, response = await self.client_response_queue.get()
+            if client_id in self.client_writers:
+                writer = self.client_writers[client_id]
+                if response:
+                    await self.safe_write(writer, f"{client_id}:{response.hex()}\n".encode())
+                else:
+                    await self.safe_write(writer, f"{client_id}:\n".encode())
+                
+                # Remove the client_id from client_writers after sending the response
+                del self.client_writers[client_id]
+            else:
+                logger.warning(f"No writer found for client_id: {client_id}")
+
     async def run(self):
         self.running = True
         server = await asyncio.start_server(
@@ -258,6 +266,9 @@ class LuminaModbusServer:
 
         addr = server.sockets[0].getsockname()
         logger.info(f'Server started. Listening on {addr}')
+
+        # Start the client response handler
+        asyncio.create_task(self.client_response_handler())
 
         async with server:
             await server.serve_forever()

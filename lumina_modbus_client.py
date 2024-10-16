@@ -2,10 +2,12 @@ import asyncio
 import logging
 import uuid  # Add this import
 import time  # Add this import
-
+# import GLOBALS
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# logger = GLOBALS.logger
 
 class LuminaModbusClient:
     def __init__(self):
@@ -17,6 +19,8 @@ class LuminaModbusClient:
         self.response_timeout = 5  # 5 seconds timeout for responses
         self.command_queue = asyncio.Queue()
         self.processing_task = None
+        self._read_lock = asyncio.Lock()
+        self.command_timeout = 5  # 5 seconds timeout for individual commands
 
     def initialize(self):
         self.reader = None
@@ -25,14 +29,14 @@ class LuminaModbusClient:
         self.keep_alive_task = None
         self.is_connected = False
         self.last_ping_time = 0
-        self.ping_interval = 9999910  # Set the ping interval to 2 seconds
+        self.ping_interval = 30  # Set the ping interval to 2 seconds
 
     async def connect(self, host='127.0.0.1', port=8888):
         try:
             self.reader, self.writer = await asyncio.open_connection(host, port)
             self.is_connected = True
             logger.info(f"Connected to server at {host}:{port}")
-            self._start_keep_alive()
+            # self._start_keep_alive()
             asyncio.create_task(self._cleanup_recent_commands())  # Start the cleanup task
             # Start the response reading task
             asyncio.create_task(self._read_responses())
@@ -107,7 +111,9 @@ class LuminaModbusClient:
         self.keep_alive_task = None
 
     async def send_command(self, name, port, command, baudrate=9600, response_length=20, host='127.0.0.1', server_port=8888, timeout=None):
-        command_uuid = str(uuid.uuid4())
+        # Truncate the hex command if it's longer than 12 characters
+        truncated_hex = command.hex()[:12] if len(command.hex()) > 12 else command.hex()
+        command_id = f"{port}_{name}_{truncated_hex}"
         command_info = {
             'name': name,
             'port': port,
@@ -116,22 +122,24 @@ class LuminaModbusClient:
             'response_length': response_length,
             'host': host,
             'server_port': server_port,
-            'uuid': command_uuid,
-            'timeout': timeout
+            'id': command_id,
+            'timeout': timeout or self.command_timeout
         }
         
+        # logger.debug(f"Queueing command: {command_info}")
         await self.command_queue.put(command_info)
         
         if self.processing_task is None or self.processing_task.done():
             self.processing_task = asyncio.create_task(self._process_command_queue())
 
-        return command_uuid
+        return command_id
 
     async def _process_command_queue(self):
         while not self.command_queue.empty():
             command_info = await self.command_queue.get()
             try:
                 await self._send_command(command_info)
+                await asyncio.sleep(0.05)
             except Exception as e:
                 logger.error(f"Error processing command: {e}")
             finally:
@@ -147,7 +155,7 @@ class LuminaModbusClient:
                 command_with_crc = command_info['command'] + crc
 
                 message_parts = [
-                    command_info['uuid'],
+                    command_info['id'],
                     command_info['name'],
                     command_info['port'],
                     str(command_info['baudrate']),
@@ -160,36 +168,31 @@ class LuminaModbusClient:
 
                 message = ":".join(message_parts) + "\n"
                 
-                logger.info(f"{command_info['name']} sending command: UUID={command_info['uuid']}, "
-                            f"port={command_info['port']}, baudrate={command_info['baudrate']}, "
-                            f"command={command_with_crc.hex()}, response_length={command_info['response_length']}, "
-                            f"timeout={command_info['timeout']}")
+                logger.debug(f"Sending command: {message.strip()}")
                 
                 self.writer.write(message.encode())
                 await self.writer.drain()
 
-                self.recent_commands[command_info['uuid']] = {
+                self.recent_commands[command_info['id']] = {
                     'command': command_with_crc.hex(),
                     'response_length': command_info['response_length'],
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'timeout': command_info['timeout']
                 }
 
             except Exception as e:
-                logger.error(f"Error during command execution: {str(e)}")
+                logger.error(f"Error during command execution: {str(e)}", exc_info=True)
                 await self._reconnect()
                 raise
 
     async def _read_responses(self):
-        while self.is_connected:
+        while True:
             try:
-                # Add a check for reader availability
-                if self.reader is None or self.reader.at_eof():
-                    logger.error("Reader is not available or at EOF. Attempting to reconnect...")
-                    await self._reconnect()
-                    continue
-
-                response = await asyncio.wait_for(self.reader.readuntil(b'\n'), timeout=self.response_timeout)
+                async with self._read_lock:
+                    response = await asyncio.wait_for(self.reader.readuntil(b'\n'), timeout=self.response_timeout)
                 response = response.strip()
+                
+                logger.debug(f"Received raw response: {response}")
                 
                 response_parts = response.decode().split(':', 1)
                 response_uuid = response_parts[0]
@@ -198,18 +201,21 @@ class LuminaModbusClient:
                 if response_uuid in self.recent_commands:
                     command_info = self.recent_commands[response_uuid]
                     if not response_data or len(bytes.fromhex(response_data)) == command_info['response_length']:
-                        # logger.info(f"Received matching response for command {response_uuid}")
+                        logger.info(f"Received matching response for command {response_uuid}")
                         await self.notify_observers({"type": "response", "data": response})
+                    else:
+                        logger.warning(f"Response length mismatch for command {response_uuid}")
+                        await self.notify_observers({"type": "error", "data": {"command_uuid": response_uuid, "error": "Response length mismatch"}})
                     del self.recent_commands[response_uuid]
                 else:
                     logger.warning(f"Received unmatched response: {response}")
                     await self.notify_observers({"type": "unmatched_response", "data": response})
             
             except asyncio.TimeoutError:
-                # Check for timed out commands
+                logger.debug("Timeout while waiting for response, checking for timed out commands")
                 current_time = time.time()
                 timed_out_commands = [uuid for uuid, info in self.recent_commands.items() 
-                                      if current_time - info['timestamp'] > self.response_timeout]
+                                      if current_time - info['timestamp'] > info['timeout']]
                 
                 for uuid in timed_out_commands:
                     logger.warning(f"Timeout for command: {uuid}")
@@ -221,8 +227,7 @@ class LuminaModbusClient:
                 await self._reconnect()
 
             except Exception as e:
-                logger.error(f"Error in _read_responses: {str(e)}")
-                logger.exception("Detailed traceback:")
+                logger.error(f"Error in _read_responses: {str(e)}", exc_info=True)
                 await asyncio.sleep(1)  # Add a small delay before retrying
 
     # Add a new method to clean up old commands
