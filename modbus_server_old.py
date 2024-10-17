@@ -69,8 +69,15 @@ class LuminaModbusServer:
                     
                     try:
                         # Read until we find a byte that matches either the first or second byte of start_bytes
+                        read_start_time = asyncio.get_event_loop().time()
                         while len(response) < 2:
-                            byte = await asyncio.wait_for(reader.read(1), timeout=0.2)
+                            if asyncio.get_event_loop().time() - read_start_time > timeout:
+                                raise asyncio.TimeoutError("Timeout waiting for start bytes")
+                            byte = await asyncio.wait_for(reader.read(1), timeout=0.1)
+                            if not byte:
+                                logger.warning(f"Port {port} - Device reported readiness but returned no data")
+                                await asyncio.sleep(0.01)  # Short delay before retrying
+                                continue
                             if byte in [start_bytes[0:1], start_bytes[1:2]]:
                                 response += byte
                                 if len(response) == 1 and byte == start_bytes[1:2]:
@@ -81,9 +88,11 @@ class LuminaModbusServer:
 
                         # Now read the rest of the expected response
                         while len(response) < expected_length:
-                            chunk = await asyncio.wait_for(reader.read(expected_length - len(response)), timeout=timeout)
-                            if not chunk:  # No more data available
-                                break
+                            chunk = await asyncio.wait_for(reader.read(expected_length - len(response)), timeout=0.1)
+                            if not chunk:
+                                logger.warning(f"Port {port} - No data received, retrying...")
+                                await asyncio.sleep(0.01)  # Short delay before retrying
+                                continue
                             response += chunk
                         
                         logger.info(f"Port {port} - Received {len(response)} bytes: {format_bytes(response)}")

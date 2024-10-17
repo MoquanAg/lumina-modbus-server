@@ -200,7 +200,10 @@ class LuminaModbusClient:
                 
                 if response_uuid in self.recent_commands:
                     command_info = self.recent_commands[response_uuid]
-                    if not response_data or len(bytes.fromhex(response_data)) == command_info['response_length']:
+                    if response_data in ['MISMATCH', 'TIMEOUT']:
+                        logger.warning(f"Received {response_data} for command {response_uuid}")
+                        await self.notify_observers({"type": "error", "data": {"command_uuid": response_uuid, "error": response_data}})
+                    elif not response_data or len(bytes.fromhex(response_data)) == command_info['response_length']:
                         logger.info(f"Received matching response for command {response_uuid}")
                         await self.notify_observers({"type": "response", "data": response})
                     else:
@@ -210,6 +213,10 @@ class LuminaModbusClient:
                 else:
                     logger.warning(f"Received unmatched response: {response}")
                     await self.notify_observers({"type": "unmatched_response", "data": response})
+            
+            except ValueError as e:
+                logger.error(f"Error parsing response: {str(e)}")
+                await self.notify_observers({"type": "error", "data": {"error": "Invalid response format"}})
             
             except asyncio.TimeoutError:
                 logger.debug("Timeout while waiting for response, checking for timed out commands")
@@ -282,3 +289,4 @@ class LuminaModbusClient:
         """
         if observer in self.observers:
             self.observers.remove(observer)
+
