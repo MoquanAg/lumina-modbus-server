@@ -18,6 +18,9 @@ class LuminaModbusServer:
         self.recent_commands = {}
         self.server = None
         self.logger = LuminaLogger('LuminaModbusServer')
+        self.port_loggers = {}
+        for port_name in AVAILABLE_PORTS:
+            self.port_loggers[port_name] = LuminaLogger(f'{port_name.split("/")[-1]}')
 
     async def start(self):
         self.server = await asyncio.start_server(
@@ -105,28 +108,25 @@ class LuminaModbusServer:
                 self.command_queues[port].task_done()
 
     async def execute_modbus_command(self, port, command_info):
+        port_logger = self.port_loggers[port]
         baudrate = command_info['baudrate']
         if port not in self.serial_ports or baudrate not in self.serial_ports[port]:
             self.serial_ports[port][baudrate] = await self.init_serial_port(port, baudrate)
         
         reader, writer = self.serial_ports[port][baudrate]
         
-        self.logger.info(f"Executing command on port {port}, baud rate {baudrate}")
+        port_logger.info(f"Executing command on port {port}, baud rate {baudrate}")
         
-        # Use the baud rate from the client request
         baud_rate = command_info['baudrate']
-        char_time = 11 / baud_rate  # 11 bits per character (1 start + 8 data + 1 stop + 1 parity)
+        char_time = 11 / baud_rate
 
-        # Record start time
         start_time = asyncio.get_event_loop().time()
 
-        # Send command
-        self.logger.info(f"Sending {len(command_info['command'])} bytes to {port}: {' '.join(f'{b:02X}' for b in command_info['command'])}")
-        self.logger.info(f"Expected response length: {command_info['response_length']} bytes")
+        port_logger.info(f"Sending {len(command_info['command'])} bytes to {port}: {' '.join(f'{b:02X}' for b in command_info['command'])}")
+        port_logger.info(f"Expected response length: {command_info['response_length']} bytes")
         writer.write(command_info['command'])
         await writer.drain()
 
-        # Read response
         try:
             response = bytearray()
             remaining_length = command_info['response_length']
@@ -135,57 +135,46 @@ class LuminaModbusServer:
             iteration = 0
             while remaining_length > 0 and timeout > 0:
                 iteration += 1
-                self.logger.info(f"Starting iteration {iteration} for command on port {port}")
-                await asyncio.sleep(3.5 * char_time) # Wait for 3.5 character times between reads
+                port_logger.info(f"Starting iteration {iteration} for command on port {port}")
+                await asyncio.sleep(3.5 * char_time)
                 read_start = asyncio.get_event_loop().time()
                 chunk = await asyncio.wait_for(reader.read(remaining_length), timeout=timeout)
                 read_end = asyncio.get_event_loop().time()
                 
-                # Only take the remaining length bytes if the chunk is larger
                 chunk = chunk[:remaining_length]
                 response.extend(chunk)
                 remaining_length -= len(chunk)
                 timeout -= (read_end - read_start)
 
                 if remaining_length > 0:
-                    self.logger.info(f"Partial response received. Waiting for {remaining_length} more bytes.")
-                    await asyncio.sleep(3.5 * char_time)  # Wait for 3.5 character times between reads
+                    port_logger.info(f"Partial response received. Waiting for {remaining_length} more bytes.")
+                    await asyncio.sleep(3.5 * char_time)
                 
-                self.logger.info(f"Received {len(response)} bytes from {port}: {' '.join(f'{b:02X}' for b in response)}")
+                port_logger.info(f"Received {len(response)} bytes from {port}: {' '.join(f'{b:02X}' for b in response)}")
 
             if remaining_length > 0:
                 raise asyncio.TimeoutError("Timed out while waiting for complete response")
 
-            self.logger.info(f"Received {len(response)} bytes from {port}: {' '.join(f'{b:02X}' for b in response)}")
-            
-            # Record end time and calculate total time
             end_time = asyncio.get_event_loop().time()
             total_time = end_time - start_time
-            self.logger.info(f"Total time from sending to receiving full response: {total_time:.6f} seconds")
+            port_logger.info(f"Total time from sending to receiving full response: {total_time:.6f} seconds")
             
-            # Check if the first two bytes of the response match the command
             if len(response) >= 2 and response[:2] == command_info['command'][:2]:
-                # Send response back to client as a hexadecimal string
                 hex_response = response.hex()
                 client_response = f"{command_info['command_id']}:{hex_response}\n"
                 command_info['writer'].write(client_response.encode())
                 await command_info['writer'].drain()
-                self.logger.info(f"Sent {len(response)} bytes to client {command_info['client_id']}")
+                port_logger.info(f"Sent {len(response)} bytes to client {command_info['client_id']}")
             
         except asyncio.TimeoutError:
-            # Record end time and calculate total time for timeout case
             end_time = asyncio.get_event_loop().time()
             total_time = end_time - start_time
-            self.logger.warning(f"Timeout waiting for response on port {port}. Total time: {total_time:.6f} seconds")
+            port_logger.warning(f"Timeout waiting for response on port {port}. Total time: {total_time:.6f} seconds")
 
-        # After reading the expected response or timing out, clear any remaining data
         await self.clear_buffer(reader)
 
     async def clear_buffer(self, reader):
-        # Wait a short time for any remaining data to arrive
         await asyncio.sleep(0.1)
-        
-        # Read and discard any remaining data
         try:
             while True:
                 chunk = await asyncio.wait_for(reader.read(100), timeout=0.1)
@@ -193,7 +182,7 @@ class LuminaModbusServer:
                     break
                 self.logger.warning(f"Cleared {len(chunk)} extra bytes from buffer")
         except asyncio.TimeoutError:
-            pass  # No more data to read
+            pass
 
     @staticmethod
     def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
@@ -228,5 +217,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
-        self.logger.info("Server shutdown initiated")
+        server.logger.info("Server shutdown initiated")
         asyncio.run(server.stop())
