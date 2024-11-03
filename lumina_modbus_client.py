@@ -2,6 +2,8 @@ import asyncio
 import logging
 import uuid  # Add this import
 import time  # Add this import
+import random
+import string
 # import GLOBALS
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -113,7 +115,11 @@ class LuminaModbusClient:
     async def send_command(self, name, port, command, baudrate=9600, response_length=20, host='127.0.0.1', server_port=8888, timeout=None):
         # Truncate the hex command if it's longer than 12 characters
         truncated_hex = command.hex()[:12] if len(command.hex()) > 12 else command.hex()
-        command_id = f"{port}_{name}_{truncated_hex}"
+        # Generate random 2-character alphanumeric string
+        random_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=2))
+        port_name = port.split("/")[-1]
+        send_time = time.strftime('%Y%m%d%H%M%S')
+        command_id = f"{port_name}_{name}_{truncated_hex}_{send_time}_{random_suffix}"
         command_info = {
             'name': name,
             'port': port,
@@ -204,7 +210,7 @@ class LuminaModbusClient:
                         logger.warning(f"Received {response_data} for command {response_uuid}")
                         await self.notify_observers({"type": "error", "data": {"command_uuid": response_uuid, "error": response_data}})
                     elif not response_data or len(bytes.fromhex(response_data)) == command_info['response_length']:
-                        logger.info(f"Received matching response for command {response_uuid}")
+                        logger.debug(f"Received matching response for command {response_uuid}")
                         await self.notify_observers({"type": "response", "data": response})
                     else:
                         logger.warning(f"Response length mismatch for command {response_uuid}")

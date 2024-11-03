@@ -110,6 +110,8 @@ class LuminaModbusServer:
     async def execute_modbus_command(self, port, command_info):
         port_logger = self.port_loggers[port]
         baudrate = command_info['baudrate']
+        command_id = command_info['command_id']
+        
         if port not in self.serial_ports or baudrate not in self.serial_ports[port]:
             self.serial_ports[port][baudrate] = await self.init_serial_port(port, baudrate)
         
@@ -118,15 +120,16 @@ class LuminaModbusServer:
         port_logger.info(f"Executing command on port {port}, baud rate {baudrate}")
         
         baud_rate = command_info['baudrate']
-        char_time = 11 / baud_rate  # Time for one character (11 bits: 1 start + 8 data + 1 stop + 1 parity)
+        char_time = 11 / baud_rate  # Time for one character
         
-        # Calculate total expected transmission time for the response
         expected_response_length = command_info['response_length']
         transmission_time = char_time * expected_response_length
-        # Add a safety margin of 50% to account for inter-character delays and processing time
-        wait_time = transmission_time * 1.5
+        wait_time = transmission_time * 1.5 + 0.02
 
         start_time = asyncio.get_event_loop().time()
+        
+        # Clear buffer before sending new command
+        await self.clear_buffer(reader)
         
         port_logger.info(f"Sending {len(command_info['command'])} bytes to {port}: {' '.join(f'{b:02X}' for b in command_info['command'])}")
         port_logger.info(f"Expected response length: {expected_response_length} bytes")
@@ -142,61 +145,49 @@ class LuminaModbusServer:
 
             await asyncio.sleep(wait_time)
             
-            # Try to read the full response in one go
-            chunk = await asyncio.wait_for(reader.read(remaining_length), timeout=timeout)
-            response.extend(chunk)
+            while remaining_length > 0 and timeout > 0:
+                read_start = asyncio.get_event_loop().time()
+                chunk = await asyncio.wait_for(reader.read(remaining_length), timeout=timeout)
+                read_end = asyncio.get_event_loop().time()
+                
+                if not chunk:
+                    break
+                
+                response.extend(chunk)
+                remaining_length -= len(chunk)
+                timeout -= (read_end - read_start)
+                
+                if remaining_length > 0:
+                    # Add small delay between reads
+                    await asyncio.sleep(char_time * 2)
+                    port_logger.debug(f"Partial response received: {len(response)}/{expected_response_length} bytes")
             
-            port_logger.info(f"Received {len(response)} bytes from {port}: {' '.join(f'{b:02X}' for b in response)}")
+            if len(response) > 0:
+                port_logger.info(f"Received {len(response)} bytes from {port}: {' '.join(f'{b:02X}' for b in response)}")
             
-            # If we got all expected bytes, process the response and return
             if len(response) == expected_response_length:
                 if len(response) >= 2 and response[:2] == command_info['command'][:2]:
                     hex_response = response.hex()
                     client_response = f"{command_info['command_id']}:{hex_response}\n"
                     command_info['writer'].write(client_response.encode())
                     await command_info['writer'].drain()
-                    port_logger.info(f"Sent {len(response)} bytes to client {command_info['client_id']}")
+                    port_logger.debug(f"Sent {len(response)} bytes to client {command_info['client_id']}")
                     end_time = asyncio.get_event_loop().time()
                     total_time = end_time - start_time
                     port_logger.info(f"Command completed successfully. Total time: {total_time:.6f} seconds")
-                    return  # Exit the function on success
+                    return
             
-            # Only reach here if we didn't get enough bytes
-            port_logger.warning(f"Incomplete response received ({len(response)}/{expected_response_length} bytes). Falling back to iterative reading.")
-            remaining_length = expected_response_length - len(response)
-            while remaining_length > 0 and timeout > 0:
-                await asyncio.sleep(3.5 * char_time)
-                read_start = asyncio.get_event_loop().time()
-                chunk = await asyncio.wait_for(reader.read(remaining_length), timeout=timeout)
-                read_end = asyncio.get_event_loop().time()
-                
-                chunk = chunk[:remaining_length]
-                response.extend(chunk)
-                remaining_length -= len(chunk)
-                timeout -= (read_end - read_start)
-                
-                port_logger.info(f"Additional chunk received: {len(chunk)} bytes. Remaining: {remaining_length} bytes")
-
-            if remaining_length > 0:
-                raise asyncio.TimeoutError("Timed out while waiting for complete response")
-
+            # Improved error handling for incomplete responses
+            if len(response) != expected_response_length:
+                raise asyncio.TimeoutError(f"Incomplete response: got {len(response)}/{expected_response_length} bytes")
+            
+        except asyncio.TimeoutError as e:
             end_time = asyncio.get_event_loop().time()
             total_time = end_time - start_time
-            port_logger.info(f"Total time from sending to receiving full response: {total_time:.6f} seconds")
-            
-            if len(response) >= 2 and response[:2] == command_info['command'][:2]:
-                hex_response = response.hex()
-                client_response = f"{command_info['command_id']}:{hex_response}\n"
-                command_info['writer'].write(client_response.encode())
-                await command_info['writer'].drain()
-                port_logger.info(f"Sent {len(response)} bytes to client {command_info['client_id']}")
-            
-        except asyncio.TimeoutError:
-            end_time = asyncio.get_event_loop().time()
-            total_time = end_time - start_time
-            port_logger.warning(f"Timeout waiting for response on port {port}. Total time: {total_time:.6f} seconds")
-
-        await self.clear_buffer(reader)
+            port_logger.warning(f"Timeout waiting for response on port {port} for command ID {command_id}. {str(e)}. Total time: {total_time:.6f} seconds")
+        finally:
+            # Always clear buffer after command execution
+            await self.clear_buffer(reader)
 
     async def clear_buffer(self, reader):
         await asyncio.sleep(0.1)
