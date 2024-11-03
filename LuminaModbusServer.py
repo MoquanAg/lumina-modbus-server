@@ -97,6 +97,8 @@ class LuminaModbusServer:
             command_info = await self.command_queues[port].get()
             try:
                 await self.execute_modbus_command(port, command_info)
+                await asyncio.sleep(0.05)
+                
             except Exception as e:
                 self.logger.error(f"Error processing command on port {port}: {str(e)}")
             finally:

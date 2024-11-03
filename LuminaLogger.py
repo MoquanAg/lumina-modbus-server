@@ -10,6 +10,7 @@ class LuminaLogger:
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.DEBUG)
         self.current_log_file = None
+        self.max_file_size = 5 * 1024 * 1024  # 5 MB
         self.setup_logger()
 
     def setup_logger(self):
@@ -35,14 +36,13 @@ class LuminaLogger:
 
         # Create new log file name
         current_date = datetime.now().strftime('%Y-%m-%d')
-        log_file_name = f"{current_date}.log"
-        log_file_path = os.path.join(self.log_dir, log_file_name)
+        log_file_path = self.get_available_log_file_path(current_date)
 
         # Create rotating file handler
         file_handler = RotatingFileHandler(
             log_file_path,
-            maxBytes=1024 * 1024,  # 1 MB
-            backupCount=0  # No backups, new file will be created
+            maxBytes=self.max_file_size,
+            backupCount=0  # No backups, new file will be created with suffix
         )
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -52,9 +52,23 @@ class LuminaLogger:
         self.logger.addHandler(file_handler)
         self.current_log_file = file_handler
 
+    def get_available_log_file_path(self, current_date):
+        base_name = f"{current_date}.log"
+        log_file_path = os.path.join(self.log_dir, base_name)
+        suffix = 1
+
+        while os.path.exists(log_file_path) and os.path.getsize(log_file_path) >= self.max_file_size:
+            log_file_path = os.path.join(self.log_dir, f"{current_date}_{suffix}.log")
+            suffix += 1
+
+        return log_file_path
+
     def check_and_rotate_log(self):
         current_date = datetime.now().strftime('%Y-%m-%d')
-        if self.current_log_file.baseFilename != os.path.join(self.log_dir, f"{current_date}.log"):
+        current_log_path = self.current_log_file.baseFilename
+        
+        if os.path.getsize(current_log_path) >= self.max_file_size or \
+           os.path.basename(current_log_path) != f"{current_date}.log":
             self.create_new_log_file()
 
     def debug(self, message):
@@ -76,4 +90,3 @@ class LuminaLogger:
     def critical(self, message):
         self.check_and_rotate_log()
         self.logger.critical(message)
-
