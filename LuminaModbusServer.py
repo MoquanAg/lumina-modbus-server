@@ -191,12 +191,22 @@ class LuminaModbusServer:
 
     async def clear_buffer(self, reader):
         await asyncio.sleep(0.1)
+        # Find which port this reader belongs to
+        port = None
+        for port_name, port_dict in self.serial_ports.items():
+            for baudrate, (r, _) in port_dict.items():
+                if r == reader:
+                    port = port_name
+                    break
+            if port:
+                break
+
         try:
             while True:
                 chunk = await asyncio.wait_for(reader.read(100), timeout=0.1)
                 if not chunk:
                     break
-                self.logger.warning(f"Cleared {len(chunk)} extra bytes from buffer")
+                self.logger.warning(f"Cleared {len(chunk)} extra bytes from buffer on port {port}")
         except asyncio.TimeoutError:
             pass
 
