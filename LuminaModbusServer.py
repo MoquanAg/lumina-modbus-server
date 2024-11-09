@@ -43,6 +43,15 @@ class LuminaModbusServer:
 
             serial_port = await serial_asyncio.open_serial_connection(url=port_name, baudrate=baudrate)
             self.logger.info(f"Initialized serial port {port_name} with baudrate {baudrate}")
+            
+            # Wait a moment for the port to stabilize
+            await asyncio.sleep(0.1)
+            
+            # Clear any potential leftover data
+            reader, writer = serial_port
+            await self.clear_buffer(reader)
+            self.logger.info(f"Cleared initial buffer for port {port_name}")
+            
             self.serial_ports[port_name][baudrate] = serial_port
             return serial_port
         except Exception as e:
