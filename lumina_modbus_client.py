@@ -132,7 +132,7 @@ class LuminaModbusClient:
             'timeout': timeout or self.command_timeout
         }
         
-        # logger.debug(f"Queueing command: {command_info}")
+        logger.debug(f"Queueing command: {command_info}")
         await self.command_queue.put(command_info)
         
         if self.processing_task is None or self.processing_task.done():
