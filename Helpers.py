@@ -4,6 +4,16 @@ import time
 from collections import defaultdict
 
 class RetryManager:
+    """
+    Manages automatic retries for failed operations with exponential backoff.
+
+    Attributes:
+        max_retries (int): Maximum number of retry attempts
+        backoff_factor (float): Multiplier for exponential backoff calculation
+        retry_counts (dict): Tracks retry attempts per command
+        logger (LuminaLogger): Logger instance for retry operations
+    """
+
     def __init__(self, max_retries=3, backoff_factor=1.5):
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
@@ -11,6 +21,21 @@ class RetryManager:
         self.logger = LuminaLogger("RetryManager")
 
     async def execute_with_retry(self, func, *args, **kwargs):
+        """
+        Execute a function with automatic retry on failure.
+
+        Args:
+            func (callable): Async function to execute
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
+
+        Returns:
+            Any: Result of the successful function execution
+
+        Raises:
+            Exception: Last encountered exception after all retries fail
+        """
+
         attempt = 0
         last_exception = None
         command_id = kwargs.get('command_id', 'unknown')
@@ -32,6 +57,16 @@ class RetryManager:
         raise last_exception
 
 class CommandPrioritizer:
+    """
+    Manages command queues with different priority levels.
+
+    Attributes:
+        high_priority_queue (PriorityQueue): Queue for high priority commands
+        normal_priority_queue (Queue): Queue for normal priority commands
+        low_priority_queue (Queue): Queue for low priority commands
+        logger (LuminaLogger): Logger for queue operations
+    """
+
     def __init__(self):
         self.high_priority_queue = asyncio.PriorityQueue()
         self.normal_priority_queue = asyncio.Queue()
@@ -39,6 +74,14 @@ class CommandPrioritizer:
         self.logger = LuminaLogger("CommandPrioritizer")
 
     async def enqueue_command(self, priority, command):
+        """
+        Enqueue a command with specified priority.
+
+        Args:
+            priority (str): Priority level ("high", "normal", or "low")
+            command (dict): Command data to enqueue
+        """
+
         if priority == "high":
             await self.high_priority_queue.put((1, command))
         elif priority == "normal":
@@ -47,6 +90,13 @@ class CommandPrioritizer:
             await self.low_priority_queue.put(command)
 
     async def get_next_command(self):
+        """
+        Get the next command respecting priority order.
+
+        Returns:
+            dict: Next command to execute
+        """
+
         if not self.high_priority_queue.empty():
             _, command = await self.high_priority_queue.get()
             return command
@@ -55,6 +105,16 @@ class CommandPrioritizer:
         return await self.low_priority_queue.get()
 
 class PerformanceMonitor:
+    """
+    Tracks and analyzes command execution performance metrics.
+
+    Attributes:
+        command_timings (dict): Execution times for each command
+        port_statistics (dict): Performance statistics per port
+        logger (LuminaLogger): Logger for performance monitoring
+        start_time (float): Monitor start timestamp
+    """
+
     def __init__(self):
         self.command_timings = {}
         self.port_statistics = {}
@@ -62,6 +122,15 @@ class PerformanceMonitor:
         self.start_time = time.time()
 
     def record_command_execution(self, port, command_id, execution_time):
+        """
+        Record execution time for a command.
+
+        Args:
+            port (str): Port identifier
+            command_id (str): Command identifier
+            execution_time (float): Execution duration in seconds
+        """
+
         if port not in self.port_statistics:
             self.port_statistics[port] = {
                 'total_commands': 0,
@@ -80,6 +149,13 @@ class PerformanceMonitor:
         self.command_timings[command_id] = execution_time
 
     def get_port_performance_report(self):
+        """
+        Generate performance report for all ports.
+
+        Returns:
+            dict: Performance metrics per port
+        """
+
         report = {}
         for port, stats in self.port_statistics.items():
             if stats['total_commands'] > 0:
@@ -94,15 +170,45 @@ class PerformanceMonitor:
         return report
 
 class CommandValidator:
+    """
+    Validates command structures against predefined patterns.
+
+    Attributes:
+        logger (LuminaLogger): Logger for validation operations
+        valid_commands (set): Set of valid command names
+        command_patterns (dict): Patterns for command validation
+    """
+
     def __init__(self):
         self.logger = LuminaLogger("CommandValidator")
         self.valid_commands = set()
         self.command_patterns = {}
         
     def register_command_pattern(self, command_name, pattern):
+        """
+        Register a new command pattern.
+
+        Args:
+            command_name (str): Name of the command
+            pattern (bytes): Expected byte pattern
+        """
+
         self.command_patterns[command_name] = pattern
         
     def validate_command(self, command_data):
+        """
+        Validate a command against its registered pattern.
+
+        Args:
+            command_data (dict): Command data including name and bytes
+
+        Returns:
+            bool: True if valid, False otherwise
+
+        Raises:
+            ValueError: If command type unknown or pattern mismatch
+        """
+
         command_type = command_data.get('name')
         if command_type not in self.command_patterns:
             raise ValueError(f"Unknown command type: {command_type}")
@@ -126,6 +232,16 @@ class CommandValidator:
         return True
 
 class ConnectionPool:
+    """
+    Manages a pool of reusable connections.
+
+    Attributes:
+        max_connections (int): Maximum number of concurrent connections
+        active_connections (dict): Currently active connections
+        connection_queue (Queue): Queue for connection requests
+        logger (LuminaLogger): Logger for connection operations
+    """
+
     def __init__(self, max_connections=10):
         self.max_connections = max_connections
         self.active_connections = {}
@@ -133,6 +249,17 @@ class ConnectionPool:
         self.logger = LuminaLogger("ConnectionPool")
         
     async def get_connection(self, port, baudrate):
+        """
+        Get or create a connection for specified port and baudrate.
+
+        Args:
+            port (str): Port identifier
+            baudrate (int): Communication baudrate
+
+        Returns:
+            Connection: Active connection object
+        """
+
         connection_key = f"{port}:{baudrate}"
         
         if connection_key in self.active_connections:
@@ -156,6 +283,16 @@ class ConnectionPool:
         pass
 
 class DeviceStateManager:
+    """
+    Manages and tracks device state changes.
+
+    Attributes:
+        device_states (dict): Current state of each device
+        state_history (defaultdict): Historical state changes
+        state_locks (dict): Locks for thread-safe state updates
+        logger (LuminaLogger): Logger for state changes
+    """
+
     def __init__(self):
         self.device_states = {}
         self.state_history = defaultdict(list)
@@ -163,6 +300,14 @@ class DeviceStateManager:
         self.logger = LuminaLogger("DeviceStateManager")
         
     async def update_state(self, device_id, new_state):
+        """
+        Update device state with change tracking.
+
+        Args:
+            device_id (str): Device identifier
+            new_state (dict): New device state
+        """
+
         if device_id not in self.state_locks:
             self.state_locks[device_id] = asyncio.Lock()
             
@@ -197,6 +342,14 @@ class DeviceStateManager:
         return changes
 
 class QueueAnalytics:
+    """
+    Analyzes queue performance and metrics.
+
+    Attributes:
+        queue_metrics (defaultdict): Metrics for each queue
+        logger (LuminaLogger): Logger for analytics
+    """
+
     def __init__(self):
         self.queue_metrics = defaultdict(lambda: {
             'enqueued': 0,
@@ -208,6 +361,14 @@ class QueueAnalytics:
         self.logger = LuminaLogger("QueueAnalytics")
         
     def record_enqueue(self, queue_name, command_id):
+        """
+        Record command enqueue event.
+
+        Args:
+            queue_name (str): Queue identifier
+            command_id (str): Command identifier
+        """
+
         self.queue_metrics[queue_name]['enqueued'] += 1
         self.queue_metrics[queue_name]['current_queue_size'] = (
             self.queue_metrics[queue_name]['enqueued'] - 
@@ -226,6 +387,16 @@ class QueueAnalytics:
         self.queue_metrics[queue_name]['processing_times'].append(processing_time)
         
     def get_queue_statistics(self, queue_name):
+        """
+        Get statistics for specified queue.
+
+        Args:
+            queue_name (str): Queue identifier
+
+        Returns:
+            dict: Queue performance metrics
+        """
+
         metrics = self.queue_metrics[queue_name]
         wait_times = metrics['wait_times']
         processing_times = metrics['processing_times']
@@ -240,6 +411,14 @@ class QueueAnalytics:
         }
 
 class ResponseParser:
+    """
+    Parses device responses according to registered patterns.
+
+    Attributes:
+        response_patterns (dict): Patterns for response parsing
+        logger (LuminaLogger): Logger for parsing operations
+    """
+
     def __init__(self):
         self.response_patterns = {}
         self.logger = LuminaLogger("ResponseParser")
@@ -248,6 +427,20 @@ class ResponseParser:
         self.response_patterns[command_type] = pattern
         
     def parse_response(self, command_type, response_bytes):
+        """
+        Parse response bytes according to command pattern.
+
+        Args:
+            command_type (str): Type of command
+            response_bytes (bytes): Raw response data
+
+        Returns:
+            dict: Parsed response data
+
+        Raises:
+            ValueError: If no pattern registered or parsing fails
+        """
+
         if command_type not in self.response_patterns:
             raise ValueError(f"No response pattern registered for {command_type}")
             
@@ -280,6 +473,15 @@ class ResponseParser:
             raise ValueError(f"Unknown field type: {field_type}")
 
 class DeviceConfigManager:
+    """
+    Manages device configurations and validation.
+
+    Attributes:
+        device_configs (dict): Device configurations
+        config_validators (dict): Validation schemas
+        logger (LuminaLogger): Logger for configuration operations
+    """
+
     def __init__(self):
         self.device_configs = {}
         self.config_validators = {}
@@ -289,6 +491,18 @@ class DeviceConfigManager:
         self.config_validators[device_type] = config_schema
         
     async def set_device_config(self, device_id, device_type, config):
+        """
+        Set and validate device configuration.
+
+        Args:
+            device_id (str): Device identifier
+            device_type (str): Type of device
+            config (dict): Configuration data
+
+        Raises:
+            ValueError: If configuration invalid or schema missing
+        """
+
         if device_type not in self.config_validators:
             raise ValueError(f"No configuration schema for device type: {device_type}")
             

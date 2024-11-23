@@ -21,7 +21,30 @@ from LuminaLogger import LuminaLogger
 AVAILABLE_PORTS = ['/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4']
 
 class LuminaModbusServer:
+    """
+    Asynchronous Modbus server implementation for handling multiple serial ports.
+    Manages client connections, command queuing, and serial communication with proper timing.
+
+    Attributes:
+        host (str): Server host address
+        port (int): Server port number
+        clients (set): Set of connected client IDs
+        serial_ports (dict): Dictionary of serial port connections by port name and baudrate
+        command_queues (dict): Command queues for each port
+        recent_commands (dict): Cache of recently executed commands
+        server (asyncio.Server): Asyncio server instance
+        logger (LuminaLogger): Main server logger
+        port_loggers (dict): Individual loggers for each port
+    """
+
     def __init__(self, host='127.0.0.1', port=8888):
+        """
+        Initialize the Modbus server with host and port configuration.
+
+        Args:
+            host (str): Server host address, defaults to localhost
+            port (int): Server port number, defaults to 8888
+        """
         self.host = host
         self.port = port
         self.clients = set()
@@ -35,6 +58,10 @@ class LuminaModbusServer:
             self.port_loggers[port_name] = LuminaLogger(f'{port_name.split("/")[-1]}')
 
     async def start(self):
+        """
+        Start the Modbus server and initialize all serial ports.
+        Creates command processing tasks for each available port.
+        """
         self.server = await asyncio.start_server(
             self.handle_client, self.host, self.port)
         self.logger.info(f"Server started on {self.host}:{self.port}")
@@ -49,6 +76,16 @@ class LuminaModbusServer:
             await self.server.serve_forever()
 
     async def init_serial_port(self, port_name, baudrate):
+        """
+        Initialize a serial port with specified baudrate.
+
+        Args:
+            port_name (str): Serial port device path
+            baudrate (int): Communication baudrate
+
+        Returns:
+            tuple: (reader, writer) pair for serial communication, or None if initialization fails
+        """
         try:
             if port_name in self.serial_ports and baudrate in self.serial_ports[port_name]:
                 return self.serial_ports[port_name][baudrate]
@@ -71,6 +108,13 @@ class LuminaModbusServer:
             return None
 
     async def handle_client(self, reader, writer):
+        """
+        Handle incoming client connections and their messages.
+
+        Args:
+            reader (StreamReader): Async stream reader for client
+            writer (StreamWriter): Async stream writer for client
+        """
         client_id = id(writer)
         self.clients.add(client_id)
         self.logger.info(f"New client connected: {client_id}")
@@ -88,6 +132,14 @@ class LuminaModbusServer:
             self.logger.info(f"Client disconnected: {client_id}")
 
     async def process_client_message(self, client_id, message, writer):
+        """
+        Process incoming messages from clients and queue commands.
+
+        Args:
+            client_id (int): Unique client identifier
+            message (str): Received message string
+            writer (StreamWriter): Client's stream writer for responses
+        """
         parts = message.split(':')
         if len(parts) < 6:
             self.logger.warning(f"Invalid message format from client {client_id}: {message}")
@@ -117,6 +169,12 @@ class LuminaModbusServer:
         })
 
     async def process_command_queue(self, port):
+        """
+        Process commands in the queue for a specific port.
+
+        Args:
+            port (str): Serial port identifier
+        """
         while True:
             command_info = await self.command_queues[port].get()
             try:
@@ -129,6 +187,13 @@ class LuminaModbusServer:
                 self.command_queues[port].task_done()
 
     async def execute_modbus_command(self, port, command_info):
+        """
+        Execute a Modbus command on specified port with timing calculations.
+
+        Args:
+            port (str): Serial port identifier
+            command_info (dict): Command details including baudrate, timeout, and expected response
+        """
         port_logger = self.port_loggers[port]
         baudrate = command_info['baudrate']
         command_id = command_info['command_id']
@@ -211,6 +276,12 @@ class LuminaModbusServer:
             await self.clear_buffer(reader)
 
     async def clear_buffer(self, reader):
+        """
+        Clear any remaining data in the serial port buffer.
+
+        Args:
+            reader (StreamReader): Serial port reader
+        """
         await asyncio.sleep(0.1)
         # Find which port this reader belongs to
         port = None
@@ -233,6 +304,16 @@ class LuminaModbusServer:
 
     @staticmethod
     def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
+        """
+        Calculate CRC16 checksum for Modbus messages.
+
+        Args:
+            data (bytearray): Data to calculate CRC for
+            high_byte_first (bool): If True, returns high byte first
+
+        Returns:
+            bytearray: Calculated CRC bytes
+        """
         crc = 0xFFFF
         for byte in data:
             crc ^= byte
@@ -251,6 +332,10 @@ class LuminaModbusServer:
             return bytearray([low_byte, high_byte])
 
     async def stop(self):
+        """
+        Stop the server and close all connections.
+        Closes server and all serial port connections gracefully.
+        """
         if self.server:
             self.server.close()
             await self.server.wait_closed()

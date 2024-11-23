@@ -24,6 +24,19 @@ logger = logging.getLogger(__name__)
 # logger = GLOBALS.logger
 
 class LuminaModbusClient:
+    """
+    Asynchronous Modbus client for industrial communication with automatic reconnection and command queuing.
+    
+    Attributes:
+        response_queues (dict): Stores response queues for commands
+        read_lock (asyncio.Lock): Lock for thread-safe reading operations
+        observers (list): List of observers for response handling
+        recent_commands (dict): Cache of recently sent commands
+        response_timeout (int): Timeout duration for responses in seconds
+        command_queue (asyncio.Queue): Queue for pending commands
+        command_timeout (int): Timeout duration for individual commands
+    """
+
     def __init__(self):
         self.initialize()
         self.response_queues = {}
@@ -37,6 +50,10 @@ class LuminaModbusClient:
         self.command_timeout = 5  # 5 seconds timeout for individual commands
 
     def initialize(self):
+        """
+        Initialize core client attributes and connection state.
+        Sets up connection-related attributes and timing parameters.
+        """
         self.reader = None
         self.writer = None
         self.communication_lock = asyncio.Lock()
@@ -46,6 +63,16 @@ class LuminaModbusClient:
         self.ping_interval = 30  # Set the ping interval to 2 seconds
 
     async def connect(self, host='127.0.0.1', port=8888):
+        """
+        Establish connection to the Modbus server.
+
+        Args:
+            host (str): Server hostname or IP address
+            port (int): Server port number
+
+        Raises:
+            Exception: If connection fails
+        """
         try:
             self.reader, self.writer = await asyncio.open_connection(host, port)
             self.is_connected = True
@@ -64,6 +91,10 @@ class LuminaModbusClient:
             self.keep_alive_task = asyncio.create_task(self._keep_alive())
 
     async def _keep_alive(self):
+        """
+        Maintain connection with periodic ping messages.
+        Handles reconnection if ping fails.
+        """
         while self.is_connected:
             try:
                 current_time = asyncio.get_event_loop().time()
@@ -95,6 +126,10 @@ class LuminaModbusClient:
             await asyncio.sleep(0.1)  # Short sleep to prevent busy-waiting
 
     async def _reconnect(self):
+        """
+        Attempt to reconnect to the server after connection loss.
+        Implements exponential backoff retry mechanism.
+        """
         self.is_connected = False
         await self.close()  # Ensure existing connection is closed
         while not self.is_connected:
@@ -107,6 +142,10 @@ class LuminaModbusClient:
                 await asyncio.sleep(5)
 
     async def close(self):
+        """
+        Close the client connection and cleanup resources.
+        Cancels keep-alive task and closes writer/reader streams.
+        """
         if self.writer:
             try:
                 self.writer.close()
@@ -125,6 +164,22 @@ class LuminaModbusClient:
         self.keep_alive_task = None
 
     async def send_command(self, name, port, command, baudrate=9600, response_length=20, host='127.0.0.1', server_port=8888, timeout=None):
+        """
+        Queue a command for sending to the Modbus server.
+
+        Args:
+            name (str): Command identifier
+            port (str): Serial port path
+            command (bytes): Command data
+            baudrate (int): Serial communication baudrate
+            response_length (int): Expected response length
+            host (str): Server hostname
+            server_port (int): Server port
+            timeout (int, optional): Command-specific timeout
+
+        Returns:
+            str: Unique command identifier
+        """
         # Truncate the hex command if it's longer than 12 characters
         truncated_hex = command.hex()[:12] if len(command.hex()) > 12 else command.hex()
         # Generate random 2-character alphanumeric string
@@ -153,6 +208,10 @@ class LuminaModbusClient:
         return command_id
 
     async def _process_command_queue(self):
+        """
+        Process queued commands asynchronously.
+        Handles command execution and error handling for the command queue.
+        """
         while not self.command_queue.empty():
             command_info = await self.command_queue.get()
             try:
@@ -164,6 +223,15 @@ class LuminaModbusClient:
                 self.command_queue.task_done()
 
     async def _send_command(self, command_info):
+        """
+        Send a single command to the server with CRC calculation.
+
+        Args:
+            command_info (dict): Command information including ID, name, port, etc.
+
+        Raises:
+            Exception: If command sending fails
+        """
         async with self.communication_lock:
             try:
                 if not self.is_connected:
@@ -204,6 +272,10 @@ class LuminaModbusClient:
                 raise
 
     async def _read_responses(self):
+        """
+        Continuously read and process responses from the server.
+        Handles response parsing, timeout detection, and observer notifications.
+        """
         while True:
             try:
                 async with self._read_lock:
@@ -257,6 +329,10 @@ class LuminaModbusClient:
 
     # Add a new method to clean up old commands
     async def _cleanup_recent_commands(self):
+        """
+        Periodically clean up expired commands from recent_commands cache.
+        Removes commands older than 10 seconds.
+        """
         while True:
             current_time = time.time()
             self.recent_commands = {
@@ -275,6 +351,16 @@ class LuminaModbusClient:
     ### CRC16 Calculation
     @staticmethod
     def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
+        """
+        Calculate CRC16 checksum for Modbus messages.
+
+        Args:
+            data (bytearray): Data to calculate CRC for
+            high_byte_first (bool): If True, returns high byte first
+
+        Returns:
+            bytearray: Calculated CRC bytes
+        """
         crc = 0xFFFF
         for byte in data:
             crc ^= byte
@@ -296,14 +382,20 @@ class LuminaModbusClient:
 
     def add_observer(self, observer):
         """
-        Add an observer to the list of observers.
+        Add an observer to receive response notifications.
+
+        Args:
+            observer: Observer object implementing process_received_message
         """
         if observer not in self.observers:
             self.observers.append(observer)
 
     def remove_observer(self, observer):
         """
-        Remove an observer from the list of observers.
+        Remove an observer from the notification list.
+
+        Args:
+            observer: Observer object to remove
         """
         if observer in self.observers:
             self.observers.remove(observer)
