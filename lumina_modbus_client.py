@@ -1,3 +1,15 @@
+"""
+LuminaModbusClient: Asynchronous Modbus client implementation for industrial communication.
+Handles command queuing, response processing, and connection management with automatic reconnection.
+
+Features:
+- Asynchronous command processing
+- Automatic reconnection
+- CRC16 calculation
+- Command timeout handling
+- Observer pattern for response handling
+"""
+
 import asyncio
 import logging
 import uuid  # Add this import

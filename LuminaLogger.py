@@ -1,3 +1,14 @@
+"""
+LuminaLogger: A robust logging utility for managing rotational logs with size limits.
+Provides daily log rotation and size-based splitting with consistent formatting.
+
+Features:
+- Automatic log rotation based on date and size
+- Console and file logging
+- Configurable log directory and file size limits
+- Standard logging levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+"""
+
 import os
 import logging
 from logging.handlers import RotatingFileHandler

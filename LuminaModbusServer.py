@@ -1,3 +1,15 @@
+"""
+LuminaModbusServer: Asynchronous Modbus server implementation for handling multiple serial ports.
+Manages client connections, command queuing, and serial communication with proper timing.
+
+Features:
+- Multi-client support
+- Multiple serial port handling
+- Baudrate-specific connections
+- Proper timing calculations for Modbus RTU
+- Comprehensive logging
+"""
+
 import asyncio
 import serial_asyncio
 from LuminaLogger import LuminaLogger

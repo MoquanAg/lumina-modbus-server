@@ -1,4 +1,7 @@
 #!/bin/bash
+# Lumina Modbus Server Startup Script
+# This script manages the startup of the Modbus server application,
+# handling process cleanup and virtual environment activation.
 
 # Configuration
 VENV_PATH="/home/lumina/lumina-modbus-server/venv"

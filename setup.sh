@@ -1,4 +1,8 @@
 #!/bin/bash
+# Lumina Modbus Server Setup Script
+# This script sets up the necessary environment and autostart configuration
+# for the Lumina Modbus Server application.
+# Requires root privileges.
 
 # Check if the script is run as root
 if [ "$EUID" -ne 0 ]; then
