@@ -10,6 +10,7 @@ A high-performance, asynchronous Modbus RTU server/client implementation with mu
 - **Comprehensive Logging**: Detailed logging with rotation support
 - **Command Queuing**: Efficient command processing with timeout handling
 - **CRC16 Verification**: Built-in error checking
+- **Advanced Utilities**: Rich set of helper classes for enhanced functionality
 
 ## Installation
 
@@ -46,8 +47,89 @@ response_length=7
 )
 asyncio.run(main())
 ```
-### Logging Implementation
+
+
+## Advanced Features
+
+### Retry Management
+Handle failed commands with automatic retries and exponential backoff:
+```python
+from Helpers import RetryManager
+retry_manager = RetryManager(max_retries=3, backoff_factor=1.5)
+result = await retry_manager.execute_with_retry(client.send_command, command_data)
+```
+### Command Prioritization
+Implement priority-based command queuing:
 python
+from Helpers import CommandPrioritizer
+prioritizer = CommandPrioritizer()
+await prioritizer.enqueue_command("high", command_data)
+next_command = await prioritizer.get_next_command()
+```
+
+### Performance Monitoring
+Track command execution performance:
+```python
+from Helpers import PerformanceMonitor
+monitor = PerformanceMonitor()
+monitor.record_command_execution(port="/dev/ttyAMA2", command_id="cmd1", execution_time=0.5)
+report = monitor.get_port_performance_report()
+```
+
+### Command Validation
+Validate commands before execution:
+```python
+from Helpers import CommandValidator
+validator = CommandValidator()
+is_valid = await validator.validate_command(command_data)
+```
+
+### Connection Pool Management
+Manage multiple connections efficiently:
+```python
+from Helpers import ConnectionPool
+pool = ConnectionPool(max_connections=10)
+connection = await pool.get_connection(port="/dev/ttyAMA2", baudrate=9600)
+```
+
+### Device State Management
+Track and manage device states:
+```python
+from Helpers import DeviceStateManager
+state_manager = DeviceStateManager()
+await state_manager.update_state("device1", new_state_data)
+```
+
+### Queue Analytics
+Monitor command queue performance:
+```python
+from Helpers import QueueAnalytics
+analytics = QueueAnalytics()
+analytics.record_enqueue("main_queue", "cmd1")
+stats = analytics.get_queue_statistics("main_queue")
+```
+
+### Response Parsing
+Parse command responses with predefined patterns:
+```python
+from Helpers import ResponseParser
+parser = ResponseParser()
+parser.register_response_pattern("read_holding", pattern_definition)
+parsed_data = parser.parse_response("read_holding", response_bytes)
+```
+
+
+### Device Configuration Management
+Manage device configurations:
+```python
+from Helpers import DeviceConfigManager
+config_manager = DeviceConfigManager()
+config_manager.register_device_config("device_type1", config_schema)
+await config_manager.set_device_config("device1", "device_type1", config_data)
+```
+
+### Logging Implementation
+```python
 from LuminaLogger import LuminaLogger
 logger = LuminaLogger("MyApplication")
 logger.info("Application started")
