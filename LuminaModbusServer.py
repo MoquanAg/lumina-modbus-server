@@ -35,9 +35,10 @@ class LuminaModbusServer:
         server (asyncio.Server): Asyncio server instance
         logger (LuminaLogger): Main server logger
         port_loggers (dict): Individual loggers for each port
+        request_timeout (float): Maximum age of requests in seconds
     """
 
-    def __init__(self, host='127.0.0.1', port=8888, max_queue_size=100):
+    def __init__(self, host='127.0.0.1', port=8888, max_queue_size=100, request_timeout=30):
         """
         Initialize the Modbus server with host and port configuration.
 
@@ -45,6 +46,7 @@ class LuminaModbusServer:
             host (str): Server host address, defaults to localhost
             port (int): Server port number, defaults to 8888
             max_queue_size (int): Maximum size of the command queue
+            request_timeout (float): Maximum age of requests in seconds
         """
         self.host = host
         self.port = port
@@ -55,6 +57,7 @@ class LuminaModbusServer:
         self.server = None
         self.logger = LuminaLogger('LuminaModbusServer')
         self.port_loggers = {}
+        self.request_timeout = request_timeout  # Maximum age of requests in seconds
         for port_name in AVAILABLE_PORTS:
             self.port_loggers[port_name] = LuminaLogger(f'{port_name.split("/")[-1]}')
             self.command_queues[port_name] = asyncio.Queue(maxsize=max_queue_size)
@@ -160,15 +163,27 @@ class LuminaModbusServer:
 
         self.logger.info(f"Received from client {client_id}: Command ID: {command_id}, Port: {port}, Baud: {baudrate}, Command: {command_hex}")
 
-        await self.command_queues[port].put({
+        command_info = {
             'client_id': client_id,
             'command_id': command_id,
             'command': command,
             'response_length': response_length,
             'timeout': timeout,
             'writer': writer,
-            'baudrate': baudrate
-        })
+            'baudrate': baudrate,
+            'timestamp': asyncio.get_event_loop().time()  # Add timestamp
+        }
+
+        try:
+            # Will raise QueueFull if queue is at max_queue_size
+            await asyncio.wait_for(
+                self.command_queues[port].put(command_info),
+                timeout=0.1  # Short timeout for queue insertion
+            )
+        except (asyncio.TimeoutError, asyncio.QueueFull):
+            error_response = f"{command_id}:QUEUE_FULL\n"
+            writer.write(error_response.encode())
+            await writer.drain()
 
     async def process_command_queue(self, port):
         """
@@ -178,15 +193,48 @@ class LuminaModbusServer:
             port (str): Serial port identifier
         """
         while True:
+            # Check and clean old requests before processing next item
+            await self.clean_old_requests(port)
+            
             command_info = await self.command_queues[port].get()
             try:
-                await self.execute_modbus_command(port, command_info)
-                await asyncio.sleep(0.05)
+                # Check if request is too old before processing
+                age = asyncio.get_event_loop().time() - command_info['timestamp']
+                if age > self.request_timeout:
+                    self.logger.warning(f"Dropping old request (age: {age:.1f}s) from client {command_info['client_id']}")
+                    error_response = f"{command_info['command_id']}:REQUEST_EXPIRED\n"
+                    command_info['writer'].write(error_response.encode())
+                    await command_info['writer'].drain()
+                else:
+                    await self.execute_modbus_command(port, command_info)
                 
             except Exception as e:
                 self.logger.error(f"Error processing command on port {port}: {str(e)}")
             finally:
                 self.command_queues[port].task_done()
+
+    async def clean_old_requests(self, port):
+        """Clean out expired requests from the queue without client notification."""
+        current_time = asyncio.get_event_loop().time()
+        
+        # Create a new queue
+        new_queue = asyncio.Queue(maxsize=self.command_queues[port].maxsize)
+        
+        # Move items to new queue, silently dropping expired ones
+        while not self.command_queues[port].empty():
+            try:
+                item = self.command_queues[port].get_nowait()
+                age = current_time - item['timestamp']
+                
+                if age <= self.request_timeout:
+                    await new_queue.put(item)
+                else:
+                    self.logger.warning(f"Dropped expired request from client {item['client_id']} (age: {age:.1f}s)")
+            except asyncio.QueueEmpty:
+                break
+
+        # Replace old queue with new one
+        self.command_queues[port] = new_queue
 
     async def execute_modbus_command(self, port, command_info):
         """
@@ -341,7 +389,7 @@ class LuminaModbusServer:
         self.logger.info("Server stopped")
 
 if __name__ == "__main__":
-    server = LuminaModbusServer()
+    server = LuminaModbusServer(max_queue_size=30, request_timeout=10)  # 30-second timeout
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
