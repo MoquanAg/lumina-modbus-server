@@ -125,15 +125,25 @@ class LuminaModbusServer:
         self.logger.info(f"New client connected: {client_id}")
         try:
             while True:
-                data = await reader.readuntil(b'\n')
-                message = data.decode().strip()
-                await self.process_client_message(client_id, message, writer)
-        except asyncio.IncompleteReadError:
-            pass
+                try:
+                    data = await reader.readuntil(b'\n')
+                    message = data.decode().strip()
+                    await self.process_client_message(client_id, message, writer)
+                except (ConnectionResetError, ConnectionError) as e:
+                    self.logger.info(f"Client {client_id} connection reset: {str(e)}")
+                    break
+                except asyncio.IncompleteReadError:
+                    self.logger.info(f"Client {client_id} disconnected")
+                    break
+        except Exception as e:
+            self.logger.error(f"Error handling client {client_id}: {str(e)}")
         finally:
             self.clients.remove(client_id)
-            writer.close()
-            await writer.wait_closed()
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception as e:
+                self.logger.debug(f"Error during client {client_id} cleanup: {str(e)}")
             self.logger.info(f"Client disconnected: {client_id}")
 
     async def process_client_message(self, client_id, message, writer):
@@ -161,7 +171,7 @@ class LuminaModbusServer:
             self.logger.error(f"Invalid data in message from client {client_id}: {str(e)}")
             return
 
-        self.logger.info(f"Received from client {client_id}: Command ID: {command_id}, Port: {port}, Baud: {baudrate}, Command: {command_hex}")
+        self.logger.info(f"Received from client {client_id}: Command ID: {command_id}, Port: {port}, Baud: {baudrate}, Command: {command_hex}, Response Length: {response_length}, Timeout: {timeout}")
 
         command_info = {
             'client_id': client_id,
@@ -299,6 +309,7 @@ class LuminaModbusServer:
                 
                 if len(response) == expected_response_length:
                     if len(response) >= 2 and response[:2] == command_info['command'][:2]:
+                        # Just use the response as-is, it already includes CRC from the sensor
                         hex_response = response.hex()
                         client_response = f"{command_info['command_id']}:{hex_response}\n"
                         command_info['writer'].write(client_response.encode())

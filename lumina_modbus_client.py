@@ -65,6 +65,7 @@ class LuminaModbusClient:
             port,
             str(kwargs.get('baudrate', 9600)),
             command_with_crc.hex(),
+            # response_length should include the 2 CRC bytes from the sensor
             str(kwargs.get('response_length', 0))
         ]
         
@@ -148,11 +149,16 @@ class LuminaModbusClient:
                     time.sleep(0.1)
                     continue
 
-                with self._lock:
-                    data = self.socket.recv(1024).decode()
-                if not data:
-                    logger.error("Connection lost")
+                try:
+                    with self._lock:
+                        data = self.socket.recv(1024).decode()
+                    if not data:
+                        raise ConnectionError("Connection lost - empty data received")
+                except (socket.timeout, ConnectionError, OSError) as e:
+                    logger.error(f"Connection error while reading: {str(e)}")
                     self._attempt_reconnect()
+                    # Handle any pending commands that were in flight
+                    self._handle_pending_commands_on_disconnect()
                     continue
 
                 buffer += data
@@ -160,9 +166,6 @@ class LuminaModbusClient:
                     line, buffer = buffer.split('\n', 1)
                     self._handle_response(line.strip())
 
-            except socket.timeout:
-                # Check for timed out commands
-                self._check_timeouts()
             except Exception as e:
                 logger.error(f"Error reading response: {str(e)}")
                 self._attempt_reconnect()
@@ -228,6 +231,19 @@ class LuminaModbusClient:
                 ))
                 del self.recent_commands[uuid]
 
+    def _handle_pending_commands_on_disconnect(self) -> None:
+        """Handle any commands that were in flight when connection dropped"""
+        with self._lock:
+            for uuid, command_info in self.recent_commands.items():
+                logger.warning(f"Connection dropped with pending command: {uuid}")
+                self.event_emitter.emit_response(ModbusResponse(
+                    command_id=uuid,
+                    data=None,
+                    device_type=command_info['device_type'],
+                    status='connection_lost'
+                ))
+            self.recent_commands.clear()
+
     def _attempt_reconnect(self) -> None:
         if not self.is_connected:
             return
@@ -238,14 +254,18 @@ class LuminaModbusClient:
         except:
             pass
 
-        while self._running and not self.is_connected:
+        retry_count = 0
+        max_retries = 3  # Add maximum retry attempts
+        
+        while self._running and not self.is_connected and retry_count < max_retries:
             try:
-                logger.info("Attempting to reconnect...")
+                logger.info(f"Attempting to reconnect (attempt {retry_count + 1}/{max_retries})...")
                 self.connect()
                 break
             except Exception as e:
+                retry_count += 1
                 logger.error(f"Reconnection failed: {str(e)}")
-                time.sleep(5)
+                time.sleep(min(5 * retry_count, 15))  # Exponential backoff with max 15 seconds
 
     def stop(self) -> None:
         self._running = False
