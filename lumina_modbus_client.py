@@ -25,26 +25,65 @@ class LuminaModbusClient:
         self.recent_commands: Dict[str, dict] = {}
         self._lock = threading.Lock()
         
+        # Connection details
+        self._host = None
+        self._port = None
+        
         # Start worker threads
         self._command_thread = threading.Thread(target=self._process_commands, daemon=True)
         self._read_thread = threading.Thread(target=self._read_responses, daemon=True)
         self._cleanup_thread = threading.Thread(target=self._cleanup_recent_commands, daemon=True)
+        self._watchdog_thread = threading.Thread(target=self._connection_watchdog, daemon=True)
         
         self._command_thread.start()
         self._read_thread.start()
         self._cleanup_thread.start()
+        self._watchdog_thread.start()
 
     def connect(self, host='127.0.0.1', port=8888):
+        self._host = host
+        self._port = port
+        self._establish_connection()
+
+    def _establish_connection(self):
+        """Internal method to establish the socket connection"""
         try:
+            if self.socket:
+                try:
+                    self.socket.close()
+                except:
+                    pass
+            
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((host, port))
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Set TCP keepalive parameters (if supported by OS)
+            try:
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)  # Start sending keepalive after 30 seconds
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)  # Send keepalive every 5 seconds
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)    # Drop connection after 3 failed keepalives
+            except AttributeError:
+                pass  # OS doesn't support these options
+            
+            self.socket.connect((self._host, self._port))
             self.socket.settimeout(1.0)  # 1 second timeout
             self.is_connected = True
-            logger.info(f"Connected to server at {host}:{port}")
+            logger.info(f"Connected to server at {self._host}:{self._port}")
         except Exception as e:
             logger.error(f"Failed to connect: {str(e)}")
             self.is_connected = False
             raise
+
+    def _connection_watchdog(self):
+        """Monitors connection health and reconnects if necessary"""
+        while self._running:
+            if not self.is_connected and self._host and self._port:
+                try:
+                    logger.info("Watchdog attempting to reconnect...")
+                    self._establish_connection()
+                except Exception as e:
+                    logger.error(f"Watchdog reconnection failed: {str(e)}")
+                    time.sleep(5)  # Wait before retry
+            time.sleep(1)  # Check connection every second
 
     def send_command(self, device_type: str, port: str, command: bytes, **kwargs) -> str:
         # Truncate the hex command if it's longer than 12 characters
@@ -151,20 +190,26 @@ class LuminaModbusClient:
 
                 try:
                     with self._lock:
-                        data = self.socket.recv(1024).decode()
-                    if not data:
-                        raise ConnectionError("Connection lost - empty data received")
-                except (socket.timeout, ConnectionError, OSError) as e:
+                        # Reduced buffer size and using a longer timeout
+                        self.socket.settimeout(5.0)  # 5 second timeout for reads
+                        data = self.socket.recv(256).decode()
+                        if not data:
+                            raise ConnectionError("Connection lost - empty data received")
+                        buffer += data
+                except socket.timeout:
+                    # Timeout is normal, continue listening
+                    continue
+                except (ConnectionError, OSError) as e:
                     logger.error(f"Connection error while reading: {str(e)}")
                     self._attempt_reconnect()
-                    # Handle any pending commands that were in flight
                     self._handle_pending_commands_on_disconnect()
                     continue
 
-                buffer += data
+                # Process complete messages from buffer
                 while '\n' in buffer:
                     line, buffer = buffer.split('\n', 1)
-                    self._handle_response(line.strip())
+                    if line.strip():  # Only process non-empty lines
+                        self._handle_response(line.strip())
 
             except Exception as e:
                 logger.error(f"Error reading response: {str(e)}")
@@ -173,32 +218,50 @@ class LuminaModbusClient:
     def _handle_response(self, response: str) -> None:
         try:
             response_parts = response.split(':', 1)
-            response_uuid = response_parts[0]
-            response_data = response_parts[1] if len(response_parts) > 1 else ''
+            if len(response_parts) < 2:
+                logger.warning(f"Invalid response format: {response}")
+                return
 
-            if response_uuid in self.recent_commands:
-                command_info = self.recent_commands[response_uuid]
-                if response_data in ['MISMATCH', 'TIMEOUT']:
-                    logger.warning(f"Received {response_data} for command {response_uuid}")
-                    self.event_emitter.emit_response(ModbusResponse(
-                        command_id=response_uuid,
-                        data=None,
-                        device_type=command_info['device_type'],
-                        status='error'
-                    ))
+            response_uuid = response_parts[0]
+            response_data = response_parts[1]
+
+            with self._lock:
+                if response_uuid in self.recent_commands:
+                    command_info = self.recent_commands[response_uuid]
+                    
+                    # Handle different response types
+                    if response_data in ['MISMATCH', 'TIMEOUT', 'ERROR', 'QUEUE_FULL', 'REQUEST_EXPIRED']:
+                        logger.warning(f"Received {response_data} for command {response_uuid}")
+                        self.event_emitter.emit_response(ModbusResponse(
+                            command_id=response_uuid,
+                            data=None,
+                            device_type=command_info['device_type'],
+                            status=response_data.lower()
+                        ))
+                    else:
+                        try:
+                            response_bytes = bytes.fromhex(response_data) if response_data else None
+                            logger.debug(f"Received matching response for command {response_uuid}")
+                            self.event_emitter.emit_response(ModbusResponse(
+                                command_id=response_uuid,
+                                data=response_bytes,
+                                device_type=command_info['device_type'],
+                                status='success'
+                            ))
+                        except ValueError as e:
+                            logger.error(f"Invalid hex data in response: {response_data}")
+                            self.event_emitter.emit_response(ModbusResponse(
+                                command_id=response_uuid,
+                                data=None,
+                                device_type=command_info['device_type'],
+                                status='invalid_response'
+                            ))
+                    
+                    del self.recent_commands[response_uuid]
                 else:
-                    logger.debug(f"Received matching response for command {response_uuid}")
-                    self.event_emitter.emit_response(ModbusResponse(
-                        command_id=response_uuid,
-                        data=bytes.fromhex(response_data) if response_data else None,
-                        device_type=command_info['device_type'],
-                        status='success'
-                    ))
-                del self.recent_commands[response_uuid]
-            else:
-                logger.warning(f"Received unmatched response: {response}")
+                    logger.warning(f"Received unmatched response: {response}")
         except Exception as e:
-            logger.error(f"Error handling response: {str(e)}")
+            logger.error(f"Error handling response: {str(e)}", exc_info=True)
 
     def _cleanup_recent_commands(self) -> None:
         while self._running:
@@ -245,7 +308,8 @@ class LuminaModbusClient:
             self.recent_commands.clear()
 
     def _attempt_reconnect(self) -> None:
-        if not self.is_connected:
+        """Modified to use exponential backoff and maintain connection details"""
+        if not self.is_connected or not self._host or not self._port:
             return
         
         self.is_connected = False
@@ -255,17 +319,17 @@ class LuminaModbusClient:
             pass
 
         retry_count = 0
-        max_retries = 3  # Add maximum retry attempts
+        max_retries = 3
         
         while self._running and not self.is_connected and retry_count < max_retries:
             try:
                 logger.info(f"Attempting to reconnect (attempt {retry_count + 1}/{max_retries})...")
-                self.connect()
+                self._establish_connection()
                 break
             except Exception as e:
                 retry_count += 1
                 logger.error(f"Reconnection failed: {str(e)}")
-                time.sleep(min(5 * retry_count, 15))  # Exponential backoff with max 15 seconds
+                time.sleep(min(5 * retry_count, 15))
 
     def stop(self) -> None:
         self._running = False
