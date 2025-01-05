@@ -53,6 +53,9 @@ class LuminaLogger:
         # Clear any existing handlers
         self.logger.handlers = []
 
+        # Set root logger to DEBUG to ensure all logs are shown
+        logging.getLogger().setLevel(logging.DEBUG)
+
         # Create a new log file
         self.create_new_log_file()
 
@@ -65,7 +68,7 @@ class LuminaLogger:
         # Add handlers to logger
         self.logger.addHandler(console_handler)
         
-        # Ensure propagation is enabled
+        # Ensure propagation is enabled for complete logging
         self.logger.propagate = True
 
     def create_new_log_file(self):
@@ -85,9 +88,9 @@ class LuminaLogger:
         file_handler = RotatingFileHandler(
             log_file_path,
             maxBytes=self.max_file_size,
-            backupCount=0  # No backups, new file will be created with suffix
+            backupCount=5  # Keep 5 backup files instead of 0
         )
-        file_handler.setLevel(logging.DEBUG)  # Set to DEBUG to show all logs
+        file_handler.setLevel(logging.DEBUG)  # Ensure DEBUG level for file handler
         file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_formatter)
 

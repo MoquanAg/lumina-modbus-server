@@ -54,7 +54,6 @@ class THC:
         Each sensor's command is queued with the modbus client and responses
         are handled via the event emitter callback.
         """
-        tasks = []
         for _, sensor_instance in THC._instances.items():
             sensor_instance.get_status_async()
             time.sleep(0.01)  # Small delay between sensors
@@ -124,15 +123,26 @@ class THC:
         Handle responses from the modbus client event emitter.
         Called automatically when a response is received for this sensor.
         """
-        if response.command_id in self.pending_commands:
-            command_info = self.pending_commands[response.command_id]
-            if response.status == 'success':
-                if command_info['type'] == 'get_status':
-                    self._process_status_response(response.data)
-            elif response.status in ['timeout', 'error', 'connection_lost']:
-                logger.warning(f"Command failed with status {response.status} for {self.sensor_id}")
-                self.save_null_data()
-            del self.pending_commands[response.command_id]
+        # Only process responses for commands that this instance sent
+        if response.command_id not in self.pending_commands:
+            return
+            
+        logger.info(f"Received response for {self.sensor_id} with UUID: {response.command_id}")
+        
+        # Get the original command timestamp
+        command_timestamp = self.pending_commands[response.command_id].get('timestamp')
+        if command_timestamp:
+            elapsed_time = response.timestamp - command_timestamp
+            logger.debug(f"Response time for {self.sensor_id}: {elapsed_time:.3f}s")
+        
+        if response.status == 'success':
+            self._process_status_response(response.data)
+        elif response.status in ['timeout', 'error', 'connection_lost']:
+            logger.warning(f"Command failed with status {response.status} for UUID: {response.command_id}")
+            self.save_null_data()
+        
+        # Clean up the pending command after processing
+        del self.pending_commands[response.command_id]
 
     def _process_status_response(self, response):
         """Process the raw response data from the sensor."""
@@ -242,16 +252,31 @@ class THC:
         Queue a status request command with the modbus client.
         The response will be handled by _handle_response via the event emitter.
         """
+        if not self.modbus_client.is_connected:
+            logger.warning(f"ModbusClient not connected for {self.sensor_id}, saving null data")
+            self.save_null_data()
+            return
+
         command = bytearray([self.address, 0x03, 0x00, 0x00, 0x00, 0x03])
-        command_id = self.modbus_client.send_command(
-            device_type='THC',
-            port=self.port,
-            command=command,
-            baudrate=self.baud_rate,
-            response_length=11,
-            timeout=1.0
-        )
-        self.pending_commands[command_id] = {'type': 'get_status'}
+        try:
+            # logger.info(f"Sending command for {self.sensor_id}: {command.hex()}")
+            command_id = self.modbus_client.send_command(
+                device_type='THC',
+                port=self.port,
+                command=command,
+                baudrate=self.baud_rate,
+                response_length=11,
+                timeout=2.0
+            )
+            # Track the pending command with timestamp
+            self.pending_commands[command_id] = {
+                'timestamp': time.time(),
+                'timeout': 2.0
+            }
+            logger.info(f"Command queued for {self.sensor_id} with ID {command_id} ")
+        except Exception as e:
+            logger.error(f"Failed to send command for {self.sensor_id}: {e}")
+            self.save_null_data()
 
     def save_null_data(self):
         self.temperature = None
@@ -303,9 +328,17 @@ class THC:
 
 def main():
     THC.load_all_sensors(port='/dev/ttyAMA2')
-    while True:
+    iterations = 0
+    max_iterations = 10  # Set the number of iterations you want
+    
+    while iterations < max_iterations:
         THC.get_statuses_async()
-        time.sleep(5)
+        time.sleep(0.1)  # Increased from 2 to 5 seconds to give more time between readings
+        logger.info("\n\n")
+        iterations += 1
+        
+    time.sleep(1)
+    logger.info(f"Completed {max_iterations} iterations, stopping.")
 
 if __name__ == "__main__":
     main()

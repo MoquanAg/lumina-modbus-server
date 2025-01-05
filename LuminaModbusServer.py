@@ -1,10 +1,11 @@
 """
-LuminaModbusServer: Asynchronous Modbus server implementation for handling multiple serial ports.
-Manages client connections, command queuing, and serial communication with proper timing.
+LuminaModbusServer: Hybrid implementation using asyncio for network and threading for serial.
 """
 
 import asyncio
-import serial_asyncio
+import concurrent.futures
+from queue import Queue
+import serial
 from typing import Dict, Optional
 import time
 import logging
@@ -15,8 +16,7 @@ AVAILABLE_PORTS = ['/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4']
 
 @dataclass
 class SerialConnection:
-    reader: asyncio.StreamReader
-    writer: asyncio.StreamWriter
+    port: serial.Serial
     last_used: float
     in_use: bool = False
 
@@ -31,15 +31,15 @@ class LuminaModbusServer:
         self.clients = set()
         self.serial_ports: Dict[str, Dict[int, SerialConnection]] = {}
         self.command_queues = {
-            port: asyncio.Queue(maxsize=max_queue_size) 
+            port: Queue(maxsize=max_queue_size) 
             for port in AVAILABLE_PORTS
         }
         
-        # Port locks for thread safety
-        self.port_locks = {
-            port: asyncio.Lock() 
-            for port in AVAILABLE_PORTS
-        }
+        # Thread pool for serial operations
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(AVAILABLE_PORTS),
+            thread_name_prefix="serial_worker"
+        )
         
         # Logging setup
         self.logger = LuminaLogger('LuminaModbusServer')
@@ -59,31 +59,163 @@ class LuminaModbusServer:
             )
             self.logger.info(f"Server started on {self.host}:{self.port}")
             
-            # Initialize command processors for each port
-            processors = [
-                self.process_command_queue(port) 
-                for port in AVAILABLE_PORTS
-            ]
-            
-            # Start maintenance tasks
-            maintenance = [
-                self.monitor_serial_connections(),
-                self.cleanup_old_connections()
-            ]
-            
-            # Combine all tasks
-            tasks = processors + maintenance
-            
-            # Run server and all tasks
-            async with self.server:
-                await asyncio.gather(
-                    self.server.serve_forever(),
-                    *tasks
+            # Start serial processors in thread pool
+            self.logger.info("Starting serial processors...")
+            loop = asyncio.get_event_loop()
+            for port in AVAILABLE_PORTS:
+                self.logger.info(f"Starting processor for {port}")
+                loop.run_in_executor(
+                    self.thread_pool,
+                    self.process_serial_port,
+                    port
                 )
+            
+            # Run server
+            async with self.server:
+                await self.server.serve_forever()
                 
         except Exception as e:
-            self.logger.error(f"Server startup failed: {str(e)}")
+            self.logger.error(f"Server startup failed: {str(e)}", exc_info=True)
             raise
+
+    def process_serial_port(self, port: str):
+        """Process commands for a specific serial port in a dedicated thread."""
+        port_logger = self.port_loggers[port]
+        port_logger.info(f"Serial processor started for {port}")
+        
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        last_command_time = 0
+        
+        while True:
+            try:
+                # Get command from queue (blocking)
+                command_info = self.command_queues[port].get()
+                port_logger.debug(f"RECEIVED COMMAND: {command_info['command_id']}")
+                
+                # Calculate and apply inter-message delay (3.5 char times is Modbus standard)
+                current_time = time.time()
+                baudrate = command_info['baudrate']
+                char_time = 11 / baudrate  # 1 start + 8 data + 1 parity + 1 stop = 11 bits
+                min_delay = 3.5 * char_time
+                
+                # Calculate how long to wait based on last command
+                time_since_last = current_time - last_command_time
+                if time_since_last < min_delay:
+                    time.sleep(min_delay - time_since_last)
+                
+                try:
+                    # Execute command
+                    response = self.execute_serial_command(port, command_info)
+                    last_command_time = time.time()  # Update last command time
+                    
+                    # Create and run coroutine in the event loop
+                    async def send_response_coro():
+                        await self.send_response(command_info, response)
+                    
+                    loop.run_until_complete(send_response_coro())
+                    
+                except Exception as e:
+                    port_logger.error(f"Command execution failed: {str(e)}")
+                    # Create and run coroutine in the event loop
+                    async def send_error_coro():
+                        await self.send_error(command_info, str(e))
+                    
+                    loop.run_until_complete(send_error_coro())
+                    
+            except Exception as e:
+                port_logger.error(f"Error in serial processor: {str(e)}")
+            finally:
+                self.command_queues[port].task_done()
+
+    def execute_serial_command(self, port: str, command_info: dict) -> bytes:
+        """Execute a command on the serial port (runs in thread)."""
+        port_logger = self.port_loggers[port]
+        baudrate = command_info['baudrate']
+        
+        # Get or create serial connection
+        serial_conn = self.get_serial_connection(port, baudrate)
+        if not serial_conn:
+            raise Exception(f"Could not establish serial connection on {port}")
+        
+        try:
+            # Clear input buffer
+            serial_conn.port.reset_input_buffer()
+            
+            # Write command
+            command = command_info['command']
+            port_logger.info(f"Writing {len(command)} bytes to {port}: {command.hex()}")
+            serial_conn.port.write(command)
+            
+            # Calculate timing
+            char_time = 11 / baudrate
+            expected_length = command_info['response_length']
+            timeout = max(char_time * expected_length * 1.5 + 0.05, 0.1)
+            
+            # Read response
+            serial_conn.port.timeout = timeout
+            response = serial_conn.port.read(expected_length)
+            
+            if len(response) != expected_length:
+                raise Exception("Incomplete response")
+                
+            return response
+            
+        except Exception as e:
+            port_logger.error(f"Serial command failed: {str(e)}", exc_info=True)
+            raise
+
+    def get_serial_connection(self, port: str, baudrate: int) -> Optional[SerialConnection]:
+        """Get or create a serial connection (runs in thread)."""
+        try:
+            # Create new connection
+            ser = serial.Serial(
+                port=port,
+                baudrate=baudrate,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS,
+                timeout=1
+            )
+            
+            conn = SerialConnection(
+                port=ser,
+                last_used=time.time()
+            )
+            return conn
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get serial connection: {str(e)}", exc_info=True)
+            return None
+
+    async def send_response(self, command_info: dict, response: bytes):
+        """Send response back to client."""
+        try:
+            response_hex = response.hex()
+            # Add timestamp to the response format
+            timestamp = time.time()
+            message = f"{command_info['command_id']}:{response_hex}:{timestamp:.6f}\n"
+            command_info['writer'].write(message.encode())
+            await command_info['writer'].drain()
+            # Add logging for successful response
+            self.logger.debug(f"Sent response to client {command_info['client_id']}: {message.strip()}\n")
+        except Exception as e:
+            self.logger.error(f"Failed to send response: {str(e)}", exc_info=True)
+
+    async def send_error(self, command_info: dict, error: str):
+        """Send error message back to client."""
+        try:
+            # Add timestamp to the error response format
+            timestamp = time.time()
+            message = f"{command_info['command_id']}:ERROR:{error}:{timestamp:.6f}\n"
+            command_info['writer'].write(message.encode())
+            await command_info['writer'].drain()
+            # Add logging for error response
+            self.logger.debug(f"Sent error to client {command_info['client_id']}: {message.strip()}")
+        except Exception as e:
+            self.logger.error(f"Failed to send error: {str(e)}", exc_info=True)
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle incoming client connections and their messages."""
@@ -158,202 +290,27 @@ class LuminaModbusServer:
             
             # Try to queue command
             try:
-                await asyncio.wait_for(
-                    self.command_queues[port].put(command_info),
-                    timeout=0.1
+                # Convert the synchronous queue.put() to an async operation
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    self.command_queues[port].put,
+                    command_info
                 )
+                
                 self.logger.debug(
                     f"Queued command from {client_id}: "
                     f"ID={command_id}, Port={port}, "
                     f"Command={command_hex}, Length={response_length}"
                 )
                 
-            except (asyncio.TimeoutError, asyncio.QueueFull):
+            except Exception as e:
                 error_response = f"{command_id}:QUEUE_FULL\n"
                 writer.write(error_response.encode())
                 await writer.drain()
                 
         except Exception as e:
             self.logger.error(f"Error processing message from client {client_id}: {str(e)}")
-
-    async def process_command_queue(self, port: str):
-        """Process commands in the queue for a specific port."""
-        port_logger = self.port_loggers[port]
-        
-        while True:
-            try:
-                # Get next command
-                command_info = await self.command_queues[port].get()
-                
-                # Check if command is too old
-                age = time.time() - command_info['timestamp']
-                if age > self.request_timeout:
-                    port_logger.warning(
-                        f"Dropping old request (age: {age:.1f}s) "
-                        f"from client {command_info['client_id']}"
-                    )
-                    error_response = f"{command_info['command_id']}:REQUEST_EXPIRED\n"
-                    command_info['writer'].write(error_response.encode())
-                    await command_info['writer'].drain()
-                    continue
-                
-                # Execute command
-                async with self.port_locks[port]:
-                    await self.execute_modbus_command(port, command_info)
-                    
-            except Exception as e:
-                port_logger.error(f"Error processing command on {port}: {str(e)}")
-            finally:
-                self.command_queues[port].task_done()
-
-    async def execute_modbus_command(self, port: str, command_info: dict):
-        """Execute a Modbus command on specified port with timing calculations."""
-        port_logger = self.port_loggers[port]
-        baudrate = command_info['baudrate']
-        
-        try:
-            # Get or create serial connection
-            serial_conn = await self.get_serial_connection(port, baudrate)
-            if not serial_conn:
-                raise Exception(f"Could not establish serial connection on {port}")
-            
-            # Calculate timing
-            char_time = 11 / baudrate  # Time for one character (11 bits per char)
-            expected_length = command_info['response_length']
-            transmission_time = char_time * expected_length
-            wait_time = transmission_time * 1.5 + 0.02
-            
-            # Clear any leftover data
-            await self.clear_buffer(serial_conn.reader)
-            
-            # Convert hex string to bytes if needed
-            command = command_info['command']
-            if isinstance(command, str):
-                command = bytes.fromhex(command)
-            
-            # Send command
-            port_logger.debug(
-                f"Sending {len(command)} bytes: "
-                f"{' '.join(f'{b:02X}' for b in command)}"
-            )
-            serial_conn.writer.write(command)
-            await serial_conn.writer.drain()
-            
-            # Wait for response
-            try:
-                response = await asyncio.wait_for(
-                    self.read_response(serial_conn.reader, expected_length),
-                    timeout=wait_time
-                )
-                
-                # Send response back to client
-                response_hex = response.hex()
-                client_response = f"{command_info['command_id']}:{response_hex}\n"
-                command_info['writer'].write(client_response.encode())
-                await command_info['writer'].drain()
-                
-                port_logger.debug(
-                    f"Command completed successfully: "
-                    f"Response={' '.join(f'{b:02X}' for b in response)}"
-                )
-                
-            except asyncio.TimeoutError:
-                error_response = f"{command_info['command_id']}:TIMEOUT\n"
-                command_info['writer'].write(error_response.encode())
-                await command_info['writer'].drain()
-                
-        except Exception as e:
-            error_response = f"{command_info['command_id']}:ERROR\n"
-            command_info['writer'].write(error_response.encode())
-            await command_info['writer'].drain()
-            port_logger.error(f"Command execution failed: {str(e)}")
-            
-        finally:
-            # Always clear buffer after command
-            if 'serial_conn' in locals():
-                await self.clear_buffer(serial_conn.reader)
-
-    async def get_serial_connection(self, port: str, baudrate: int) -> Optional[SerialConnection]:
-        """Get or create a serial connection for the specified port and baudrate."""
-        try:
-            if port not in self.serial_ports:
-                self.serial_ports[port] = {}
-                
-            if baudrate not in self.serial_ports[port]:
-                reader, writer = await serial_asyncio.open_serial_connection(
-                    url=port,
-                    baudrate=baudrate
-                )
-                self.serial_ports[port][baudrate] = SerialConnection(
-                    reader=reader,
-                    writer=writer,
-                    last_used=time.time()
-                )
-                
-            conn = self.serial_ports[port][baudrate]
-            conn.last_used = time.time()
-            return conn
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get serial connection {port}@{baudrate}: {str(e)}")
-            return None
-
-    async def clear_buffer(self, reader: asyncio.StreamReader, timeout: float = 0.1):
-        """Clear any remaining data in the serial port buffer."""
-        try:
-            while True:
-                data = await asyncio.wait_for(reader.read(100), timeout=timeout)
-                if not data:
-                    break
-        except asyncio.TimeoutError:
-            pass
-
-    async def read_response(self, reader: asyncio.StreamReader, length: int) -> bytes:
-        """Read exact number of bytes from serial port."""
-        response = bytearray()
-        while len(response) < length:
-            chunk = await reader.read(length - len(response))
-            if not chunk:
-                raise ConnectionError("Serial connection broken")
-            response.extend(chunk)
-        return bytes(response)
-
-    async def monitor_serial_connections(self):
-        """Monitor serial connections for health and usage."""
-        while True:
-            try:
-                for port, baudrate_conns in self.serial_ports.items():
-                    for baudrate, conn in baudrate_conns.items():
-                        if time.time() - conn.last_used > 300:  # 5 minutes
-                            self.logger.info(
-                                f"Closing inactive connection: {port}@{baudrate}"
-                            )
-                            conn.writer.close()
-                            await conn.writer.wait_closed()
-                            del baudrate_conns[baudrate]
-            except Exception as e:
-                self.logger.error(f"Error in connection monitor: {str(e)}")
-            await asyncio.sleep(60)  # Check every minute
-
-    async def cleanup_old_connections(self):
-        """Clean up expired connections and commands."""
-        while True:
-            try:
-                for port in AVAILABLE_PORTS:
-                    queue = self.command_queues[port]
-                    new_queue = asyncio.Queue(maxsize=queue.maxsize)
-                    
-                    while not queue.empty():
-                        command = queue.get_nowait()
-                        age = time.time() - command['timestamp']
-                        if age <= self.request_timeout:
-                            await new_queue.put(command)
-                    
-                    self.command_queues[port] = new_queue
-                    
-            except Exception as e:
-                self.logger.error(f"Error in connection cleanup: {str(e)}")
-            await asyncio.sleep(30)  # Run every 30 seconds
 
 if __name__ == "__main__":
     server = LuminaModbusServer(max_queue_size=30, request_timeout=10)
