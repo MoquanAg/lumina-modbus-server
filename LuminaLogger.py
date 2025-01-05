@@ -50,17 +50,23 @@ class LuminaLogger:
         # Create logs directory if it doesn't exist
         os.makedirs(self.log_dir, exist_ok=True)
 
+        # Clear any existing handlers
+        self.logger.handlers = []
+
         # Create a new log file
         self.create_new_log_file()
 
-        # Create console handler
+        # Create console handler with DEBUG level (show all logs)
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.DEBUG)
+        console_handler.setLevel(logging.DEBUG)  # Set to DEBUG to show all logs
         console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         console_handler.setFormatter(console_formatter)
 
         # Add handlers to logger
         self.logger.addHandler(console_handler)
+        
+        # Ensure propagation is enabled
+        self.logger.propagate = True
 
     def create_new_log_file(self):
         """
@@ -75,13 +81,13 @@ class LuminaLogger:
         current_date = datetime.now().strftime('%Y-%m-%d')
         log_file_path = self.get_available_log_file_path(current_date)
 
-        # Create rotating file handler
+        # Create rotating file handler with DEBUG level
         file_handler = RotatingFileHandler(
             log_file_path,
             maxBytes=self.max_file_size,
             backupCount=0  # No backups, new file will be created with suffix
         )
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.DEBUG)  # Set to DEBUG to show all logs
         file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_formatter)
 
