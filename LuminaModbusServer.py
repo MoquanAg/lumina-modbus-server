@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from LuminaLogger import LuminaLogger
 
-AVAILABLE_PORTS = ['/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4']
+AVAILABLE_PORTS = ['/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4', '/dev/ttyAMA5']
 
 @dataclass
 class SerialConnection:
