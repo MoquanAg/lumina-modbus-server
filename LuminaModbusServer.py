@@ -159,7 +159,7 @@ class LuminaModbusServer:
             response = serial_conn.port.read(expected_length)
             
             if len(response) != expected_length:
-                raise Exception("Incomplete response")
+                raise Exception(f"Incomplete response. Received {len(response)} bytes, expected {expected_length} bytes")
                 
             return response
             
