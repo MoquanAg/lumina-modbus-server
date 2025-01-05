@@ -164,7 +164,7 @@ class LuminaModbusServer:
             return response
             
         except Exception as e:
-            port_logger.error(f"Serial command failed: {str(e)}", exc_info=True)
+            port_logger.error(f"Serial command failed: {str(e)}")
             raise
 
     def get_serial_connection(self, port: str, baudrate: int) -> Optional[SerialConnection]:
