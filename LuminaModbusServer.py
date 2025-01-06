@@ -196,7 +196,7 @@ class LuminaModbusServer:
             response_hex = response.hex()
             # Add timestamp to the response format
             timestamp = time.time()
-            message = f"{command_info['command_id']}:{response_hex}:{timestamp:.6f}\n"
+            message = f"{command_info['command_id']}:{response_hex}:{timestamp:.4f}\n"
             command_info['writer'].write(message.encode())
             await command_info['writer'].drain()
             # Add logging for successful response
