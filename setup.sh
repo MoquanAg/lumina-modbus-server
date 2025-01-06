@@ -18,12 +18,20 @@ LUMINA_MODBUS="$LUMINA_HOME/lumina-modbus-server"
 VENV_PATH="$LUMINA_MODBUS/venv"
 PACKAGE_PATH="$LUMINA_MODBUS/lumina-modbus-server"
 
+# Create directories if they don't exist and set permissions
+echo "Creating directories and setting permissions."
+sudo -u lumina mkdir -p "$LUMINA_MODBUS"
+chown -R lumina:lumina "$LUMINA_HOME"
+chmod -R 755 "$LUMINA_HOME"
+
 echo "Setting up Python 3.11 virtual environment."
 
 # Set up Python 3.11 virtual environment
+cd "$LUMINA_MODBUS"
 sudo -u lumina python3.11 -m venv "$VENV_PATH"
-sudo -u lumina "$VENV_PATH/bin/pip" install --upgrade pip
-sudo -u lumina "$VENV_PATH/bin/pip" install -r "$LUMINA_MODBUS/requirements.txt"
+source "$VENV_PATH/bin/activate"
+sudo -u lumina "$VENV_PATH/bin/python" -m pip install --upgrade pip
+sudo -u lumina "$VENV_PATH/bin/python" -m pip install -r "$LUMINA_MODBUS/requirements.txt"
 
 # Create autostart entry for lxterminal
 AUTOSTART_DIR="/home/lumina/.config/autostart"
