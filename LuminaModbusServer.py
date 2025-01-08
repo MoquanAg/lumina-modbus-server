@@ -50,6 +50,9 @@ class LuminaModbusServer:
             port: LuminaLogger(f'{port.split("/")[-1]}')
             for port in AVAILABLE_PORTS
         }
+        
+        # Add tracking of pending commands per client
+        self.client_pending_commands = {}
 
     async def start(self):
         """Start the Modbus server and initialize all components."""
@@ -234,6 +237,12 @@ class LuminaModbusServer:
             await command_info['writer'].drain()
             # Add logging for successful response
             self.logger.debug(f"Sent response to client {command_info['client_id']}: {message.strip()}\n")
+            
+            # Remove command from pending after successful response
+            client_id = command_info['client_id']
+            command_id = command_info['command_id']
+            if client_id in self.client_pending_commands:
+                self.client_pending_commands[client_id].discard(command_id)
         except Exception as e:
             self.logger.error(f"Failed to send response: {str(e)}", exc_info=True)
 
@@ -254,6 +263,8 @@ class LuminaModbusServer:
         """Handle incoming client connections and their messages."""
         client_id = id(writer)
         self.clients.add(client_id)
+        # Initialize pending commands set for this client
+        self.client_pending_commands[client_id] = set()
         self.logger.info(f"New client connected: {client_id}")
         
         try:
@@ -270,13 +281,37 @@ class LuminaModbusServer:
                     break
                     
         finally:
+            # Clean up any pending commands for this client
+            await self.cleanup_client_commands(client_id)
             self.clients.remove(client_id)
+            self.client_pending_commands.pop(client_id, None)
             try:
                 writer.close()
                 await writer.wait_closed()
             except Exception as e:
                 self.logger.debug(f"Error during client {client_id} cleanup: {str(e)}")
             self.logger.info(f"Client disconnected: {client_id}")
+
+    async def cleanup_client_commands(self, client_id: int):
+        """Clean up any pending commands for a disconnected client."""
+        if client_id not in self.client_pending_commands:
+            return
+            
+        pending_commands = self.client_pending_commands[client_id]
+        self.logger.info(f"Cleaning up {len(pending_commands)} pending commands for client {client_id}")
+        
+        # Remove commands from all port queues
+        for port in AVAILABLE_PORTS:
+            # Create a new queue without the disconnected client's commands
+            new_queue = Queue(maxsize=self.command_queues[port].maxsize)
+            while not self.command_queues[port].empty():
+                try:
+                    cmd = self.command_queues[port].get_nowait()
+                    if cmd['client_id'] != client_id:
+                        new_queue.put(cmd)
+                except Exception as e:
+                    self.logger.error(f"Error during queue cleanup: {str(e)}")
+            self.command_queues[port] = new_queue
 
     async def process_client_message(self, client_id: int, message: str, writer: asyncio.StreamWriter):
         """Process incoming messages from clients and queue commands."""
@@ -321,6 +356,9 @@ class LuminaModbusServer:
                 'timestamp': time.time()
             }
             
+            # Add command ID to pending commands before queuing
+            self.client_pending_commands[client_id].add(command_id)
+            
             # Try to queue command
             try:
                 # Convert the synchronous queue.put() to an async operation
@@ -338,6 +376,8 @@ class LuminaModbusServer:
                 )
                 
             except Exception as e:
+                # Remove command ID if queuing failed
+                self.client_pending_commands[client_id].remove(command_id)
                 error_response = f"{command_id}:QUEUE_FULL\n"
                 writer.write(error_response.encode())
                 await writer.drain()
