@@ -151,35 +151,36 @@ class LuminaModbusServer:
         
         while not self.shutdown_event.is_set():
             try:
-                # port_logger.debug(f"Waiting for commands on {port}")
-                # port_logger.debug(f"Current queue size for {port}: {self.command_queues[port].qsize()}")
-                
-                # Get command from queue with timeout
+                command_info = None  # Initialize outside try block
                 try:
                     command_info = self.command_queues[port].get(timeout=1.0)
                 except queue.Empty:
                     continue
                 
-                # Reset serial connection for each command
-                if port in self.serial_connections:
-                    for baudrate, conn in list(self.serial_connections[port].items()):
-                        try:
-                            if conn.port.is_open:
-                                conn.port.close()
-                                port_logger.debug(f"Closed existing connection for new command")
-                        except Exception as e:
-                            port_logger.error(f"Error closing connection: {str(e)}")
-                    self.serial_connections[port].clear()
-                
+                # Check if client is still connected before processing
+                client_id = command_info['client_id']
+                if client_id not in self.clients:
+                    port_logger.debug(f"Skipping command for disconnected client {client_id}")
+                    self.command_queues[port].task_done()  # Important: mark task as done
+                    continue
+
                 # Process command
                 try:
                     response = self.execute_serial_command(port, command_info)
-                    self.send_response_sync(command_info, response)
+                    # Check again if client is still connected before sending response
+                    if client_id in self.clients:
+                        self.send_response_sync(command_info, response)
                 except Exception as e:
                     port_logger.error(f"Error processing command: {str(e)}")
-                    self.send_error_sync(command_info, str(e))
+                    # Only try to send error if client is still connected
+                    if client_id in self.clients:
+                        self.send_error_sync(command_info, str(e))
                 finally:
-                    self.command_queues[port].task_done()
+                    if command_info:  # Only mark as done if we actually got a command
+                        try:
+                            self.command_queues[port].task_done()
+                        except ValueError:  # Handle "task_done() called too many times"
+                            port_logger.debug("Task already marked as done")
                     
             except Exception as e:
                 port_logger.error(f"Critical error in serial processor: {str(e)}")
@@ -188,14 +189,23 @@ class LuminaModbusServer:
     def send_response_sync(self, command_info: dict, response: bytes):
         """Send response back to client (synchronous version)."""
         try:
+            client_id = command_info['client_id']
+            command_id = command_info['command_id']
+            # Check if client is still connected
+            if client_id not in self.clients:
+                self.logger.debug(f"Client {client_id} disconnected, skipping response")
+                return
+
             response_hex = response.hex()
             timestamp = time.time()
             message = f"{command_info['command_id']}:{response_hex}:{timestamp:.4f}\n"
-            command_info['socket'].send(message.encode())
-            self.logger.debug(f"Sent response to client {command_info['client_id']}: {message.strip()}")
+            try:
+                command_info['socket'].send(message.encode())
+                self.logger.debug(f"Sent response to client {client_id}: {message.strip()}")
+            except (socket.error, IOError) as e:
+                self.logger.debug(f"Socket error while sending response to client {client_id}: {e}")
+                return
             
-            client_id = command_info['client_id']
-            command_id = command_info['command_id']
             if client_id in self.client_pending_commands:
                 self.client_pending_commands[client_id].discard(command_id)
         except Exception as e:
@@ -204,10 +214,19 @@ class LuminaModbusServer:
     def send_error_sync(self, command_info: dict, error: str):
         """Send error message back to client (synchronous version)."""
         try:
+            client_id = command_info['client_id']
+            # Check if client is still connected
+            if client_id not in self.clients:
+                self.logger.debug(f"Client {client_id} disconnected, skipping error message")
+                return
+
             timestamp = time.time()
             message = f"{command_info['command_id']}:ERROR:{error}:{timestamp:.6f}\n"
-            command_info['socket'].send(message.encode())
-            self.logger.debug(f"Sent error to client {command_info['client_id']}: {message.strip()}")
+            try:
+                command_info['socket'].send(message.encode())
+                self.logger.debug(f"Sent error to client {client_id}: {message.strip()}")
+            except (socket.error, IOError) as e:
+                self.logger.debug(f"Socket error while sending error to client {client_id}: {e}")
         except Exception as e:
             self.logger.error(f"Failed to send error: {str(e)}")
 
