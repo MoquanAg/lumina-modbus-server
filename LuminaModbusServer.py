@@ -11,6 +11,9 @@ import time
 import logging
 from dataclasses import dataclass
 from LuminaLogger import LuminaLogger
+import psutil
+import os
+import sys
 
 AVAILABLE_PORTS = ['/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4', '/dev/ttyAMA5']
 
@@ -150,16 +153,46 @@ class LuminaModbusServer:
             serial_conn.port.write(command)
             
             # Calculate timing
-            char_time = 11 / baudrate
+            char_time = 11 / baudrate  # 1 start + 8 data + 1 parity + 1 stop = 11 bits
             expected_length = command_info['response_length']
-            timeout = max(char_time * expected_length * 1.5 + 0.05, 0.1)
+            base_timeout = max(char_time * expected_length * 1.5 + 0.05, 0.1)
             
-            # Read response
-            serial_conn.port.timeout = timeout
-            response = serial_conn.port.read(expected_length)
+            # Read response with progressive retry logic
+            response = b''
+            remaining_bytes = expected_length
+            max_attempts = 5  # Maximum number of read attempts
+            
+            for attempt in range(max_attempts):
+                # Increase timeout progressively with each attempt
+                current_timeout = base_timeout * (attempt + 1)
+                serial_conn.port.timeout = current_timeout
+                
+                chunk = serial_conn.port.read(remaining_bytes)
+                response += chunk
+                remaining_bytes = expected_length - len(response)
+                
+                if remaining_bytes == 0:
+                    port_logger.debug(f"Complete response received after {attempt + 1} attempts")
+                    break
+                    
+                if not chunk:  # If no bytes were read
+                    port_logger.warning(
+                        f"Partial read attempt {attempt + 1}/{max_attempts}: "
+                        f"received {len(response)}/{expected_length} bytes. "
+                        f"Timeout was {current_timeout:.3f}s"
+                    )
+                    # Progressive backoff between attempts using character time
+                    if attempt < max_attempts - 1:  # Don't sleep after last attempt
+                        # Use multiples of character time for backoff, increasing with each attempt
+                        # Start with 10 char times, then 20, 40, etc.
+                        backoff_chars = 10 * (2 ** attempt)  # 10, 20, 40, 80 char times
+                        time.sleep(char_time * backoff_chars)
             
             if len(response) != expected_length:
-                raise Exception(f"Incomplete response. Received {len(response)} bytes, expected {expected_length} bytes")
+                raise Exception(
+                    f"Incomplete response after {max_attempts} attempts. "
+                    f"Received {len(response)} bytes, expected {expected_length} bytes"
+                )
                 
             return response
             
@@ -313,6 +346,20 @@ class LuminaModbusServer:
             self.logger.error(f"Error processing message from client {client_id}: {str(e)}")
 
 if __name__ == "__main__":
+    # Kill any existing instances
+    current_pid = os.getpid()
+    current_process = psutil.Process(current_pid)
+    current_name = current_process.name()
+    
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            # If it's the same program name but not our current process
+            if proc.info['name'] == current_name and proc.pid != current_pid:
+                proc.kill()
+                print(f"Killed existing process: {proc.pid}")
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
     server = LuminaModbusServer(max_queue_size=30, request_timeout=10)
     try:
         asyncio.run(server.start())
