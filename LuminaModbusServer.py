@@ -308,7 +308,7 @@ class LuminaModbusServer:
             # Calculate timing
             char_time = 11 / baudrate  # 1 start + 8 data + 1 parity + 1 stop = 11 bits
             expected_length = command_info['response_length']
-            base_timeout = char_time * expected_length * 1.5 + 0.05
+            base_timeout = char_time * 10
             
             # Read response with progressive retry logic
             response = b''
