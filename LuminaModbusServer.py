@@ -232,16 +232,22 @@ class LuminaModbusServer:
         port_logger.info(f"Starting serial execution for command {command_info['command_id']}")
         port_logger.debug(f"Command details: Port={port}, Baudrate={baudrate}, Data={command_info['command'].hex()}")
         
-        # Get or create serial connection
-        serial_conn = self.get_serial_connection(port, baudrate)
-        if not serial_conn:
-            error_msg = f"Failed to get serial connection for command {command_info['command_id']}"
-            port_logger.error(error_msg)
-            raise Exception(error_msg)
-        
-        port_logger.info(f"Successfully obtained serial connection for {port}")
-        
         try:
+            # Get or create serial connection
+            serial_conn = self.get_serial_connection(port, baudrate)
+            if not serial_conn:
+                error_msg = f"Failed to get serial connection for command {command_info['command_id']}"
+                port_logger.error(error_msg)
+                raise Exception(error_msg)
+            
+            # Check if port is still open before proceeding
+            if not serial_conn.port.is_open:
+                error_msg = f"Serial port {port} was closed before command execution"
+                port_logger.error(error_msg)
+                raise Exception(error_msg)
+
+            port_logger.info(f"Successfully obtained serial connection for {port}")
+            
             # Add serial port status check
             port_logger.info(
                 f"Serial port status before command: "
@@ -332,6 +338,12 @@ class LuminaModbusServer:
             
         except Exception as e:
             port_logger.error(f"Serial command failed: {str(e)}")
+            # Ensure we're not trying to access a closed port
+            if 'serial_conn' in locals() and serial_conn and serial_conn.port.is_open:
+                try:
+                    serial_conn.port.close()
+                except Exception as close_error:
+                    port_logger.error(f"Error closing port after failure: {str(close_error)}")
             raise
 
     def get_serial_connection(self, port: str, baudrate: int) -> Optional[SerialConnection]:
