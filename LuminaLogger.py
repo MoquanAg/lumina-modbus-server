@@ -85,11 +85,7 @@ class LuminaLogger:
         log_file_path = self.get_available_log_file_path(current_date)
 
         # Create rotating file handler with DEBUG level
-        file_handler = RotatingFileHandler(
-            log_file_path,
-            maxBytes=self.max_file_size,
-            backupCount=5  # Keep 5 backup files instead of 0
-        )
+        file_handler = logging.FileHandler(log_file_path)
         file_handler.setLevel(logging.DEBUG)  # Ensure DEBUG level for file handler
         file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_formatter)
