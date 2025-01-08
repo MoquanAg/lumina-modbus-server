@@ -22,6 +22,7 @@ class SerialConnection:
     port: serial.Serial
     last_used: float
     in_use: bool = False
+    min_command_spacing: float = 0.05  # Increase to 50ms minimum between commands
 
 class LuminaModbusServer:
     def __init__(self, host='127.0.0.1', port=8888, max_queue_size=100, request_timeout=30):
@@ -130,14 +131,25 @@ class LuminaModbusServer:
         try:
             buffer = ""
             while not self.shutdown_event.is_set():
-                data = client_socket.recv(1024).decode()
-                if not data:
-                    break
+                try:
+                    data = client_socket.recv(1024).decode()
+                    if not data:
+                        self.logger.info(f"Client {client_id} closed connection gracefully")
+                        break
                     
-                buffer += data
-                while '\n' in buffer:
-                    message, buffer = buffer.split('\n', 1)
-                    self.process_client_message(client_id, message.strip(), client_socket)
+                    buffer += data
+                    while '\n' in buffer:
+                        message, buffer = buffer.split('\n', 1)
+                        self.process_client_message(client_id, message.strip(), client_socket)
+                except ConnectionResetError:
+                    self.logger.info(f"Client {client_id} connection reset")
+                    break
+                except ConnectionError as e:
+                    self.logger.info(f"Client {client_id} connection error: {e}")
+                    break
+                except socket.error as e:
+                    self.logger.info(f"Client {client_id} socket error: {e}")
+                    break
                     
         except Exception as e:
             self.logger.error(f"Error handling client {client_id}: {str(e)}")
@@ -247,6 +259,11 @@ class LuminaModbusServer:
         port_logger = self.port_loggers[port]
         baudrate = command_info['baudrate']
         
+        # Validate response_length early
+        expected_length = command_info.get('response_length')
+        if not isinstance(expected_length, int) or expected_length <= 0:
+            raise ValueError(f"Invalid response length: {expected_length}")
+        
         # Add more detailed logging at entry point
         port_logger.info(f"Starting serial execution for command {command_info['command_id']}")
         port_logger.debug(f"Command details: Port={port}, Baudrate={baudrate}, Data={command_info['command'].hex()}")
@@ -266,6 +283,20 @@ class LuminaModbusServer:
                 raise Exception(error_msg)
 
             port_logger.info(f"Successfully obtained serial connection for {port}")
+            
+            # Add a more substantial delay between commands
+            time_since_last = time.time() - serial_conn.last_used
+            if time_since_last < serial_conn.min_command_spacing:
+                sleep_time = serial_conn.min_command_spacing - time_since_last
+                port_logger.debug(f"Sleeping {sleep_time:.3f}s between commands")
+                time.sleep(sleep_time)
+            
+            # Clear any lingering data more aggressively
+            serial_conn.port.reset_input_buffer()
+            serial_conn.port.reset_output_buffer()
+            
+            # Update last_used time before command
+            serial_conn.last_used = time.time()
             
             # Add serial port status check
             port_logger.info(
@@ -305,24 +336,28 @@ class LuminaModbusServer:
             serial_conn.port.flush()
             port_logger.debug("Write buffer flushed")
             
-            # Calculate timing
+            # Calculate timing (moved after validation)
             char_time = 11 / baudrate  # 1 start + 8 data + 1 parity + 1 stop = 11 bits
-            expected_length = command_info['response_length']
-            base_timeout = char_time * 10
+            base_timeout = char_time * expected_length * 1.5 + 0.05
             
-            # Read response with progressive retry logic
+            # Read response with timeout-based retry logic
             response = b''
             remaining_bytes = expected_length
-            max_attempts = 5  # Maximum number of read attempts
+            start_time = time.time()
+            max_time = command_info['timeout']  # Use the command's timeout value
             
-            for attempt in range(max_attempts):
-                # Reduce base timeout multiplier
-                current_timeout = base_timeout * (1 + attempt * 0.5)  # More gradual increase
+            while remaining_bytes > 0 and (time.time() - start_time) < max_time:
+                # Calculate remaining time for this attempt
+                time_elapsed = time.time() - start_time
+                time_remaining = max_time - time_elapsed
+                
+                # Use the smaller of base_timeout or remaining time
+                current_timeout = min(base_timeout, time_remaining)
                 serial_conn.port.timeout = current_timeout
                 
                 # Log pre-read buffer status
                 port_logger.debug(
-                    f"Pre-read status (attempt {attempt + 1}): "
+                    f"Pre-read status (elapsed={time_elapsed:.3f}s): "
                     f"in_waiting={serial_conn.port.in_waiting}, "
                     f"timeout={current_timeout:.3f}s"
                 )
@@ -331,25 +366,17 @@ class LuminaModbusServer:
                 response += chunk
                 remaining_bytes = expected_length - len(response)
                 
-                if remaining_bytes == 0:
-                    port_logger.debug(f"Complete response received after {attempt + 1} attempts")
-                    break
-                    
                 if not chunk:  # If no bytes were read
                     port_logger.warning(
-                        f"Partial read attempt {attempt + 1}/{max_attempts}: "
-                        f"received {len(response)}/{expected_length} bytes. "
-                        f"Timeout was {current_timeout:.3f}s"
+                        f"Partial read: received {len(response)}/{expected_length} bytes. "
+                        f"Time elapsed: {time_elapsed:.3f}s/{max_time:.3f}s"
                     )
-                    # Reduce backoff time between attempts
-                    if attempt < max_attempts - 1:
-                        # Use smaller multiples of character time, with a maximum cap
-                        backoff_chars = min(5 * (attempt + 1), 15)  # Max 15 char times
-                        time.sleep(char_time * backoff_chars)
+                    # Small delay before next attempt, scaled by baud rate
+                    time.sleep(min(char_time * 5, time_remaining))
             
             if len(response) != expected_length:
                 raise Exception(
-                    f"Incomplete response after {max_attempts} attempts. "
+                    f"Incomplete response after {time_elapsed:.3f}s. "
                     f"Received {len(response)} bytes, expected {expected_length} bytes"
                 )
                 
@@ -385,7 +412,9 @@ class LuminaModbusServer:
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 bytesize=serial.EIGHTBITS,
-                timeout=1
+                timeout=1,
+                rtscts=True,  # Enable hardware flow control if supported
+                dsrdtr=True   # Enable hardware flow control if supported
             )
             
             conn = SerialConnection(
