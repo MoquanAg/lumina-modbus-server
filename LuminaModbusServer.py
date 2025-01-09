@@ -530,18 +530,18 @@ class LuminaModbusServer:
 
 if __name__ == "__main__":
     # Kill any existing instances
-    current_pid = os.getpid()
-    current_process = psutil.Process(current_pid)
-    current_name = current_process.name()
+    # current_pid = os.getpid()
+    # current_process = psutil.Process(current_pid)
+    # current_name = current_process.name()
     
-    for proc in psutil.process_iter(['pid', 'name']):
-        try:
-            # If it's the same program name but not our current process
-            if proc.info['name'] == current_name and proc.pid != current_pid:
-                proc.kill()
-                print(f"Killed existing process: {proc.pid}")
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
+    # for proc in psutil.process_iter(['pid', 'name']):
+    #     try:
+    #         # If it's the same program name but not our current process
+    #         if proc.info['name'] == current_name and proc.pid != current_pid:
+    #             proc.kill()
+    #             print(f"Killed existing process: {proc.pid}")
+    #     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+    #         pass
 
     server = LuminaModbusServer(max_queue_size=30, request_timeout=10)
     try:
