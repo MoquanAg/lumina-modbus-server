@@ -208,7 +208,8 @@ class LuminaModbusServer:
                 self.logger.debug(f"Client {client_id} disconnected, skipping response")
                 return
 
-            response_hex = response.hex()
+            # Convert bytes to spaced hex format
+            response_hex = ' '.join(f'{b:02X}' for b in response)
             timestamp = time.time()
             message = f"{command_info['command_id']}:{response_hex}:{timestamp:.4f}\n"
             try:

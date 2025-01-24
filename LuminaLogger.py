@@ -35,7 +35,8 @@ class LuminaLogger:
             log_dir (str): Directory path for storing log files, defaults to 'logs'
         """
         self.name = name
-        self.log_dir = log_dir
+        # Convert to project-relative path
+        self.log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), log_dir)
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.DEBUG)
         self.current_log_file = None
@@ -76,9 +77,10 @@ class LuminaLogger:
         Create a new log file and set up its handler.
         Removes old file handler if exists and creates a new one with rotation settings.
         """
-        # Remove old file handler if exists
+        # Remove old file handler if exists and close it properly
         if self.current_log_file:
             self.logger.removeHandler(self.current_log_file)
+            self.current_log_file.close()  # Close the file handler explicitly
 
         # Create new log file name
         current_date = datetime.now().strftime('%Y-%m-%d')
