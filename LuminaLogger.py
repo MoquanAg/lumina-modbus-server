@@ -35,8 +35,8 @@ class LuminaLogger:
             log_dir (str): Directory path for storing log files, defaults to 'logs'
         """
         self.name = name
-        # Convert to project-relative path
-        self.log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), log_dir)
+        # Use current directory as base
+        self.log_dir = os.path.join(os.path.dirname(__file__), log_dir)
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.DEBUG)
         self.current_log_file = None
