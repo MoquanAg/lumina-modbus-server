@@ -214,8 +214,10 @@ class LuminaModbusServer:
             message = f"{command_info['command_id']}:{response_hex}:{timestamp:.4f}\n"
             try:
                 command_info['socket'].send(message.encode())
-                # Modified logging format to show only the hex data
-                self.logger.debug(f"Sent response: {response_hex}")
+                # Modified logging format to show trimmed command ID
+                command_parts = command_info['command_id'].split('_')
+                command_id = '_'.join(command_parts[:-3])  # Join all parts except the last three
+                self.logger.debug(f"Response for {command_id}: {response_hex}")
             except (socket.error, IOError) as e:
                 self.logger.debug(f"Socket error while sending response to: {e}")
                 return
