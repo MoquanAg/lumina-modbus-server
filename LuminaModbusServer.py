@@ -214,9 +214,10 @@ class LuminaModbusServer:
             message = f"{command_info['command_id']}:{response_hex}:{timestamp:.4f}\n"
             try:
                 command_info['socket'].send(message.encode())
-                self.logger.debug(f"Sent response to client {client_id}: {message.strip()}")
+                # Modified logging format to show only the hex data
+                self.logger.debug(f"Sent response: {response_hex}")
             except (socket.error, IOError) as e:
-                self.logger.debug(f"Socket error while sending response to client {client_id}: {e}")
+                self.logger.debug(f"Socket error while sending response to: {e}")
                 return
             
             if client_id in self.client_pending_commands:
@@ -266,8 +267,8 @@ class LuminaModbusServer:
             raise ValueError(f"Invalid response length: {expected_length}")
         
         # Add more detailed logging at entry point
-        port_logger.info(f"Starting serial execution for command {command_info['command_id']}")
-        port_logger.debug(f"Command details: Port={port}, Baudrate={baudrate}, Data={command_info['command'].hex()}")
+        # port_logger.info(f"Starting serial execution for command {command_info['command_id']}")
+        # port_logger.debug(f"Command details: Port={port}, Baudrate={baudrate}, Data={command_info['command'].hex()}")
         
         try:
             # Get or create serial connection
@@ -283,13 +284,13 @@ class LuminaModbusServer:
                 port_logger.error(error_msg)
                 raise Exception(error_msg)
 
-            port_logger.info(f"Successfully obtained serial connection for {port}")
+            # port_logger.info(f"Successfully obtained serial connection for {port}")
             
             # Add a more substantial delay between commands
             time_since_last = time.time() - serial_conn.last_used
             if time_since_last < serial_conn.min_command_spacing:
                 sleep_time = serial_conn.min_command_spacing - time_since_last
-                port_logger.debug(f"Sleeping {sleep_time:.3f}s between commands")
+                # port_logger.debug(f"Sleeping {sleep_time:.3f}s between commands")
                 time.sleep(sleep_time)
             
             # Clear any lingering data more aggressively
@@ -300,42 +301,42 @@ class LuminaModbusServer:
             serial_conn.last_used = time.time()
             
             # Add serial port status check
-            port_logger.info(
-                f"Serial port status before command: "
-                f"CD={serial_conn.port.cd}, "
-                f"CTS={serial_conn.port.cts}, "
-                f"DSR={serial_conn.port.dsr}, "
-                f"RI={serial_conn.port.ri}"
-            )
+            # port_logger.info(
+            #     f"Serial port status before command: "
+            #     f"CD={serial_conn.port.cd}, "
+            #     f"CTS={serial_conn.port.cts}, "
+            #     f"DSR={serial_conn.port.dsr}, "
+            #     f"RI={serial_conn.port.ri}"
+            # )
             
             # Log buffer clearing with buffer size
             in_waiting = serial_conn.port.in_waiting
-            port_logger.debug(f"Clearing input buffer (size={in_waiting}) for command {command_info['command_id']}")
+            # port_logger.debug(f"Clearing input buffer (size={in_waiting}) for command {command_info['command_id']}")
             serial_conn.port.reset_input_buffer()
             
-            # Write command with more detailed logging
+            # Modified logging format to show command ID but ignore last three underscore parts
             command = command_info['command']
+            command_parts = command_info['command_id'].split('_')
+            command_id = '_'.join(command_parts[:-3])  # Join all parts except the last three
             port_logger.info(
-                f"Writing command {command_info['command_id']}: "
+                f"Writing command {command_id}: "
                 f"Length={len(command)} bytes, "
-                f"Data={command.hex()}, "
-                f"Port={port}, "
-                f"Baudrate={baudrate}"
+                f"Data={' '.join(f'{b:02X}' for b in command)}"
             )
             
             bytes_written = serial_conn.port.write(command)
-            port_logger.info(f"Successfully wrote {bytes_written} bytes for command {command_info['command_id']}")
+            # port_logger.info(f"Successfully wrote {bytes_written} bytes for command {command_info['command_id']}")
             
             # Add immediate post-write buffer check
-            port_logger.debug(
-                f"Post-write status: "
-                f"out_waiting={serial_conn.port.out_waiting}, "
-                f"in_waiting={serial_conn.port.in_waiting}"
-            )
+            # port_logger.debug(
+            #     f"Post-write status: "
+            #     f"out_waiting={serial_conn.port.out_waiting}, "
+            #     f"in_waiting={serial_conn.port.in_waiting}"
+            # )
             
             # Force write buffer flush
             serial_conn.port.flush()
-            port_logger.debug("Write buffer flushed")
+            # port_logger.debug("Write buffer flushed")
             
             # Calculate timing (moved after validation)
             char_time = 11 / baudrate  # 1 start + 8 data + 1 parity + 1 stop = 11 bits
@@ -357,11 +358,11 @@ class LuminaModbusServer:
                 serial_conn.port.timeout = current_timeout
                 
                 # Log pre-read buffer status
-                port_logger.debug(
-                    f"Pre-read status (elapsed={time_elapsed:.3f}s): "
-                    f"in_waiting={serial_conn.port.in_waiting}, "
-                    f"timeout={current_timeout:.3f}s"
-                )
+                # port_logger.debug(
+                #     f"Pre-read status (elapsed={time_elapsed:.3f}s): "
+                #     f"in_waiting={serial_conn.port.in_waiting}, "
+                #     f"timeout={current_timeout:.3f}s"
+                # )
                 
                 chunk = serial_conn.port.read(remaining_bytes)
                 response += chunk
@@ -514,11 +515,11 @@ class LuminaModbusServer:
             try:
                 self.command_queues[port].put(command_info)
                 
-                self.logger.debug(
-                    f"Queued command from {client_id}: "
-                    f"ID={command_id}, Port={port}, "
-                    f"Command={command_hex}, Length={response_length}"
-                )
+                # self.logger.debug(
+                #     f"Queued command from {client_id}: "
+                #     f"ID={command_id}, Port={port}, "
+                #     f"Command={command_hex}, Length={response_length}"
+                # )
                 
             except Queue.Full:
                 # Remove command ID if queuing failed
