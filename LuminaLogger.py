@@ -7,12 +7,14 @@ Features:
 - Console and file logging
 - Configurable log directory and file size limits
 - Standard logging levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- Total log size limit with automatic cleanup of oldest files
 """
 
 import os
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
+import glob
 
 class LuminaLogger:
     """
@@ -24,6 +26,7 @@ class LuminaLogger:
         logger (logging.Logger): Python logger instance
         current_log_file (RotatingFileHandler): Current file handler
         max_file_size (int): Maximum size of each log file in bytes
+        max_total_size (int): Maximum total size of all log files in bytes
     """
 
     def __init__(self, name, log_dir='logs'):
@@ -41,7 +44,56 @@ class LuminaLogger:
         self.logger.setLevel(logging.DEBUG)
         self.current_log_file = None
         self.max_file_size = 5 * 1024 * 1024  # 5 MB
+        self.max_total_size = 20 * 1024 * 1024  # 20 MB
         self.setup_logger()
+
+    def get_total_log_size(self):
+        """
+        Calculate the total size of all log files in the log directory.
+
+        Returns:
+            int: Total size in bytes
+        """
+        total_size = 0
+        if os.path.exists(self.log_dir):
+            for log_file in glob.glob(os.path.join(self.log_dir, "*.log")):
+                total_size += os.path.getsize(log_file)
+        return total_size
+
+    def cleanup_old_logs(self):
+        """
+        Remove oldest log files when total size exceeds max_total_size.
+        Files are removed in order of oldest to newest until total size is under limit.
+        """
+        if not os.path.exists(self.log_dir):
+            return
+
+        # Get list of all log files with their creation times
+        log_files = []
+        for log_file in glob.glob(os.path.join(self.log_dir, "*.log")):
+            # Skip the current log file
+            if self.current_log_file and log_file == self.current_log_file.baseFilename:
+                continue
+            creation_time = os.path.getctime(log_file)
+            size = os.path.getsize(log_file)
+            log_files.append((creation_time, log_file, size))
+
+        # Sort by creation time (oldest first)
+        log_files.sort()
+
+        # Calculate current total size
+        total_size = self.get_total_log_size()
+
+        # Remove oldest files until we're under the limit
+        for _, file_path, size in log_files:
+            if total_size <= self.max_total_size:
+                break
+            try:
+                os.remove(file_path)
+                total_size -= size
+                self.logger.info(f"Removed old log file: {os.path.basename(file_path)}")
+            except OSError as e:
+                self.logger.error(f"Error removing old log file {file_path}: {str(e)}")
 
     def setup_logger(self):
         """
@@ -72,6 +124,9 @@ class LuminaLogger:
         # Ensure propagation is enabled for complete logging
         self.logger.propagate = True
 
+        # Initial cleanup of old logs
+        self.cleanup_old_logs()
+
     def create_new_log_file(self):
         """
         Create a new log file and set up its handler.
@@ -95,6 +150,9 @@ class LuminaLogger:
         # Add file handler to logger
         self.logger.addHandler(file_handler)
         self.current_log_file = file_handler
+
+        # Check and cleanup old logs if needed
+        self.cleanup_old_logs()
 
     def get_available_log_file_path(self, current_date):
         """
@@ -120,13 +178,23 @@ class LuminaLogger:
         """
         Check if log rotation is needed and perform rotation if necessary.
         Rotation occurs when current file size exceeds limit or date changes.
+        Also checks total log size and triggers cleanup if needed.
         """
+        if not self.current_log_file:
+            self.create_new_log_file()
+            return
+
         current_date = datetime.now().strftime('%Y-%m-%d')
         current_log_path = self.current_log_file.baseFilename
         
+        # Check if rotation is needed
         if os.path.getsize(current_log_path) >= self.max_file_size or \
            os.path.basename(current_log_path) != f"{current_date}.log":
             self.create_new_log_file()
+
+        # Check total size and cleanup if needed
+        if self.get_total_log_size() > self.max_total_size:
+            self.cleanup_old_logs()
 
     def debug(self, message):
         """
