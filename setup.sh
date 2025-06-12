@@ -29,11 +29,16 @@ echo "Setting up Python 3.11 virtual environment."
 # Set up Python 3.11 virtual environment
 cd "$LUMINA_MODBUS"
 sudo -u lumina python3.11 -m venv "$VENV_PATH"
-source "$VENV_PATH/bin/activate" 
-sudo -u lumina "$VENV_PATH/bin/python" -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-sudo -u lumina "$VENV_PATH/bin/python" -m pip config set global.trusted-host mirrors.aliyun.com
+source "$VENV_PATH/bin/activate"
 sudo -u lumina "$VENV_PATH/bin/python" -m pip install --upgrade pip
-sudo -u lumina "$VENV_PATH/bin/python" -m pip install -r "$LUMINA_MODBUS/requirements.txt"
+
+# Configure pip to use Aliyun mirror
+echo "Configuring pip to use Aliyun mirror."
+sudo -u lumina "$VENV_PATH/bin/pip" config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+sudo -u lumina "$VENV_PATH/bin/pip" config set global.trusted-host mirrors.aliyun.com
+
+# Install requirements using Aliyun mirror
+sudo -u lumina "$VENV_PATH/bin/pip" install -r "$LUMINA_MODBUS/requirements.txt"
 
 # Create autostart entry for lxterminal
 AUTOSTART_DIR="/home/lumina/.config/autostart"
