@@ -29,7 +29,9 @@ echo "Setting up Python 3.11 virtual environment."
 # Set up Python 3.11 virtual environment
 cd "$LUMINA_MODBUS"
 sudo -u lumina python3.11 -m venv "$VENV_PATH"
-source "$VENV_PATH/bin/activate"
+source "$VENV_PATH/bin/activate" 
+sudo -u lumina "$VENV_PATH/bin/python" -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+sudo -u lumina "$VENV_PATH/bin/python" -m pip config set global.trusted-host mirrors.aliyun.com
 sudo -u lumina "$VENV_PATH/bin/python" -m pip install --upgrade pip
 sudo -u lumina "$VENV_PATH/bin/python" -m pip install -r "$LUMINA_MODBUS/requirements.txt"
 
