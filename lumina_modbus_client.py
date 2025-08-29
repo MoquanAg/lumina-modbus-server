@@ -35,27 +35,31 @@ logger = logging.getLogger(__name__)
 from lumina_modbus_event_emitter import ModbusEventEmitter, ModbusResponse
 
 @dataclass
-class PendingCommand:
+class ModbusCommand:
+    """Proper command structure - no string parsing needed."""
     id: str
     device_type: str
-    timestamp: float
+    port: str
+    data: bytes
+    baudrate: int
     response_length: int
     timeout: float
+    timestamp: float
 
 @dataclass
+class ModbusResponse:
+    command_id: str
+    data: Optional[bytes]
+    device_type: str
+    status: str
+    timestamp: float = 0.0
+
 class ModbusError(Exception):
     def __init__(self, error_type: str, message: str, command_id: str = None):
         self.error_type = error_type
         self.message = message
         self.command_id = command_id
         super().__init__(f"{error_type}: {message}")
-
-class ModbusResponse:
-    command_id: str
-    data: Optional[bytes]
-    device_type: str
-    status: str
-    timestamp: float = 0.0  # Add timestamp field with default value
 
 class LuminaModbusClient:
     _instances = {}  # Per-process instances
@@ -109,7 +113,7 @@ class LuminaModbusClient:
         self._start_time = time.time()
         logger.info("LuminaModbusClient initialized")
         
-        self.request_times = {}  # Add dictionary to track request creation times
+        # Removed request_times tracking (simplified)
         
         # Health monitoring
         self.stats = {
@@ -191,95 +195,39 @@ class LuminaModbusClient:
                     logger.warning(f"Error closing old socket: {str(e)}")
 
     def send_command(self, device_type: str, port: str, command: bytes, **kwargs) -> str:
-        """
-        Queue a command to be sent to the server.
+        """Queue a command to be sent to the server."""
+        # Basic validation only
+        if not command:
+            raise ValueError("Command cannot be empty")
         
-        Args:
-            device_type: Type of device (e.g., 'THC', 'EC', etc.)
-            port: Serial port to use
-            command: Command bytes to send
-            **kwargs: Additional arguments (baudrate, response_length, timeout)
+        # Create command object (no string parsing)
+        cmd = ModbusCommand(
+            id=self._generate_command_id(device_type, port, command),
+            device_type=device_type,
+            port=port,
+            data=command,
+            baudrate=kwargs.get('baudrate', 9600),
+            response_length=kwargs.get('response_length', 0),
+            timeout=kwargs.get('timeout', 5.0),
+            timestamp=time.time()
+        )
         
-        Returns:
-            str: Command ID for tracking the response
-        """
-        # Input validation
-        if not isinstance(device_type, str) or not device_type.strip():
-            raise ValueError("device_type must be a non-empty string")
-        if not isinstance(port, str) or not port.strip():
-            raise ValueError("port must be a non-empty string")
-        if not isinstance(command, bytes) or len(command) == 0:
-            raise ValueError("command must be non-empty bytes")
-        
-        # Validate kwargs
-        baudrate = kwargs.get('baudrate', 9600)
-        if not isinstance(baudrate, int) or baudrate <= 0:
-            raise ValueError("baudrate must be a positive integer")
-        
-        response_length = kwargs.get('response_length', 0)
-        if not isinstance(response_length, int) or response_length < 0:
-            raise ValueError("response_length must be a non-negative integer")
-        
-        timeout = kwargs.get('timeout', 5.0)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ValueError("timeout must be a positive number")
-        
-        # Generate unique command ID
+        # Queue the command object
+        try:
+            self.command_queue.put(cmd, timeout=1.0)
+            self.pending_commands[cmd.id] = cmd
+            return cmd.id
+        except queue.Full:
+            self._handle_error(cmd.id, device_type, ModbusError('queue_full', 'Command queue full'))
+            return cmd.id
+
+    def _generate_command_id(self, device_type: str, port: str, command: bytes) -> str:
+        """Generate unique command ID."""
         truncated_hex = command.hex()[:12]
         random_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=2))
         port_name = port.split("/")[-1]
         send_time = time.strftime('%Y%m%d%H%M%S')
-        command_id = f"{port_name}_{device_type}_{truncated_hex}_{send_time}_{random_suffix}"
-        
-        # Store creation time
-        self.request_times[command_id] = time.time()
-        
-        # Add CRC to command
-        command_with_crc = command + self.calculate_crc16(command)
-        
-        # Format message parts
-        message_parts = [
-            command_id,
-            device_type,
-            port,
-            str(kwargs.get('baudrate', 9600)),
-            command_with_crc.hex(),
-            str(kwargs.get('response_length', 0))
-        ]
-        
-        if 'timeout' in kwargs:
-            message_parts.append(str(kwargs['timeout']))
-        
-        command_str = ':'.join(message_parts) + '\n'
-        
-        try:
-            logger.debug(f"Queueing command - ID: {command_id}, Device: {device_type}")
-            
-            self.command_queue.put({
-                'id': command_id,
-                'device_type': device_type,
-                'command': command_str.encode(),
-                'kwargs': kwargs,
-                'timeout': kwargs.get('timeout', 5.0)  # Use command-specific timeout or default to 5.0
-            }, timeout=1.0)
-            
-            logger.debug(f"Command queued successfully - ID: {command_id}")
-            
-            # Initialize PendingCommand with the command-specific timeout
-            self.pending_commands[command_id] = PendingCommand(
-                id=command_id,
-                device_type=device_type,
-                timestamp=0,  # Will be set when command is actually sent
-                response_length=kwargs.get('response_length', 0),
-                timeout=kwargs.get('timeout', 5.0)  # Use command-specific timeout or default to 5.0
-            )
-            
-            return command_id
-            
-        except queue.Full:
-            logger.error(f"Command queue full, dropping command - ID: {command_id}")
-            self._emit_error_response(command_id, device_type, 'queue_full')
-            return command_id
+        return f"{port_name}_{device_type}_{truncated_hex}_{send_time}_{random_suffix}"
 
     @staticmethod
     def calculate_crc16(data: bytearray, high_byte_first: bool = True) -> bytearray:
@@ -334,17 +282,14 @@ class LuminaModbusClient:
         """Process commands from the queue and send them to the server."""
         while self._running:
             try:
-                command = self.command_queue.get(timeout=0.1)
-                port = command['command'].decode().split(':')[2]  # Extract port from command string
-                port_lock = self._get_port_lock(port)
-                logger.debug(f"Processing command from queue - ID: {command['id']}")
+                cmd = self.command_queue.get(timeout=0.1)
+                port_lock = self._get_port_lock(cmd.port)
                 
                 # Check socket health before sending
                 if not self._check_socket_health():
-                    logger.error(f"Socket unhealthy before sending command {command['id']}")
                     self._attempt_reconnect()
                     if not self._check_socket_health():
-                        self._handle_command_error(command['id'], command['device_type'], 'send_failed')
+                        self._handle_error(cmd.id, cmd.device_type, ModbusError('send_failed', 'Socket unhealthy'))
                         continue
                 
                 # Respect minimum command interval
@@ -354,28 +299,22 @@ class LuminaModbusClient:
                 
                 try:
                     if self.is_connected and self.socket:
-                        with port_lock:  # Use port-specific lock
-                            logger.debug(f"Sending command to socket - ID: {command['id']}")
-                            self.socket.sendall(command['command'])
-                            send_time = time.time()
-                            self._last_command_time = send_time
+                        with port_lock:
+                            # Add CRC and send
+                            command_with_crc = cmd.data + self.calculate_crc16(cmd.data)
+                            self.socket.sendall(command_with_crc)
                             
-                            # Update pending command timestamp when actually sent
-                            if command['id'] in self.pending_commands:
-                                self.pending_commands[command['id']].timestamp = send_time
-                                logger.debug(f"Updated timestamp for command {command['id']} to {send_time}")
-                            
-                            logger.info(f"Successfully sent command - ID: {command['id']}")
+                            # Update stats
+                            self._last_command_time = time.time()
+                            cmd.timestamp = self._last_command_time
                             self.stats['commands_sent'] += 1
-                            self.stats['last_command_time'] = time.time()
+                            self.stats['last_command_time'] = self._last_command_time
                     else:
-                        logger.error(f"Socket not connected, cannot send command - ID: {command['id']}")
                         self.stats['commands_failed'] += 1
-                        self._handle_command_error(command['id'], command['device_type'], 'send_failed')
+                        self._handle_error(cmd.id, cmd.device_type, ModbusError('send_failed', 'Socket not connected'))
                 except Exception as e:
-                    logger.error(f"Failed to send command {command['id']}: {str(e)}")
                     self.stats['commands_failed'] += 1
-                    self._handle_command_error(command['id'], command['device_type'], 'send_failed')
+                    self._handle_error(cmd.id, cmd.device_type, ModbusError('send_failed', str(e)))
                 
                 self.command_queue.task_done()
                 
@@ -383,8 +322,8 @@ class LuminaModbusClient:
                 continue
             except Exception as e:
                 logger.error(f"Error in command processor: {str(e)}")
-                if 'command' in locals():
-                    self._handle_command_error(command['id'], command['device_type'], 'error')
+                if 'cmd' in locals():
+                    self._handle_error(cmd.id, cmd.device_type, ModbusError('error', str(e)))
 
     def _read_responses(self) -> None:
         """Read and process responses from the server with integrated cleanup and health checks."""
@@ -420,14 +359,12 @@ class LuminaModbusClient:
                 if not data:
                     raise ConnectionError("Connection lost")
                 
-                # Extract port from response with validation
+                # Extract port from response (simplified)
                 try:
-                    port = data.split('_')[0]  # First part of command ID is port name
-                    if not port or len(port) == 0:
-                        logger.warning(f"Invalid port in response: {data}")
+                    port = data.split('_')[0]
+                    if not port:
                         continue
-                except (IndexError, AttributeError) as e:
-                    logger.warning(f"Failed to parse port from response: {data}, error: {e}")
+                except (IndexError, AttributeError):
                     continue
                 port_lock = self._get_port_lock(port)
                 
@@ -451,99 +388,66 @@ class LuminaModbusClient:
     def _handle_response_line(self, response: str) -> None:
         """Process a single response line from the server."""
         try:
-            # Validate response format
-            if not isinstance(response, str) or not response.strip():
-                logger.warning("Empty or invalid response received")
+            if not response.strip():
                 return
             
             parts = response.split(':')
             if len(parts) < 2:
-                logger.warning(f"Invalid response format (too few parts): {response}")
                 return
             
             response_id = parts[0]
-            if not response_id or len(response_id.strip()) == 0:
-                logger.warning(f"Invalid response ID: {response}")
+            if not response_id:
                 return
             
-            # Calculate total time if we have the creation time
-            if response_id in self.request_times:
-                total_time = time.time() - self.request_times[response_id]
-                logger.info(f"Request {response_id} took {total_time:.3f} seconds")
-                del self.request_times[response_id]  # Cleanup
-            
             if response_id in self.pending_commands:
-                command_info = self.pending_commands[response_id]
-                
-                # Extract timestamp from response (use server timestamp if available)
+                cmd = self.pending_commands[response_id]
                 timestamp = float(parts[-1]) if len(parts) >= 3 else time.time()
                 
                 if 'ERROR' in parts[1]:
                     error_type = parts[2] if len(parts) >= 4 else 'unknown_error'
-                    self._emit_error_response(response_id, command_info.device_type, error_type, timestamp)
+                    self._handle_error(response_id, cmd.device_type, ModbusError(error_type, f'Server error: {error_type}'))
                 else:
                     try:
                         response_bytes = bytes.fromhex(parts[1]) if parts[1] else None
                         self.event_emitter.emit_response(ModbusResponse(
                             command_id=response_id,
                             data=response_bytes,
-                            device_type=command_info.device_type,
+                            device_type=cmd.device_type,
                             status='success',
                             timestamp=timestamp
                         ))
                         self.stats['responses_received'] += 1
                         self.stats['last_response_time'] = time.time()
                     except ValueError:
-                        self._emit_error_response(response_id, command_info.device_type, 'invalid_response', timestamp)
+                        self._handle_error(response_id, cmd.device_type, ModbusError('invalid_response', 'Invalid response format'))
                 
                 del self.pending_commands[response_id]
-            else:
-                logger.warning(f"Received response for unknown command: {response_id}")
                 
         except Exception as e:
-            logger.info(f"Error handling response line: {str(e)}")
+            logger.error(f"Error handling response: {str(e)}")
 
     def _cleanup_timed_out_commands(self) -> None:
-        """Clean up timed-out pending commands and manage memory (integrated into read thread)."""
+        """Clean up timed-out pending commands (O(n) operation)."""
         try:
             current_time = time.time()
             
-            # Clean up timed-out commands
-            timed_out = [
-                cmd_id for cmd_id, cmd in self.pending_commands.items()
-                if cmd.timestamp > 0 and  # Only check commands that have been sent
-                (current_time - cmd.timestamp) > (cmd.timeout + 0.5)  # Add small buffer
-            ]
+            # Clean up timed-out commands (O(n) - no sorting)
+            timed_out = []
+            for cmd_id, cmd in self.pending_commands.items():
+                if cmd.timestamp > 0 and (current_time - cmd.timestamp) > (cmd.timeout + 0.5):
+                    timed_out.append(cmd_id)
             
             for cmd_id in timed_out:
-                cmd_info = self.pending_commands[cmd_id]
-                logger.warning(f"Command {cmd_id} timed out after {current_time - cmd_info.timestamp:.2f}s")
+                cmd = self.pending_commands[cmd_id]
                 self.stats['timeouts'] += 1
-                self._emit_error_response(cmd_id, cmd_info.device_type, 'timeout')
+                self._handle_error(cmd_id, cmd.device_type, ModbusError('timeout', 'Command timed out'))
                 del self.pending_commands[cmd_id]
             
-            # Memory management: limit pending commands
+            # Simple memory management (O(1) check)
             if len(self.pending_commands) > Config.MAX_PENDING_COMMANDS:
-                # Remove oldest commands
-                sorted_commands = sorted(
-                    self.pending_commands.items(),
-                    key=lambda x: x[1].timestamp
-                )
-                to_remove = len(self.pending_commands) - Config.MAX_PENDING_COMMANDS
-                for cmd_id, _ in sorted_commands[:to_remove]:
-                    logger.warning(f"Removing old pending command due to memory limit: {cmd_id}")
-                    del self.pending_commands[cmd_id]
-            
-            # Memory management: limit request times tracking
-            if len(self.request_times) > Config.MAX_REQUEST_TIMES:
-                # Remove oldest entries
-                sorted_times = sorted(
-                    self.request_times.items(),
-                    key=lambda x: x[1]
-                )
-                to_remove = len(self.request_times) - Config.MAX_REQUEST_TIMES
-                for cmd_id, _ in sorted_times[:to_remove]:
-                    del self.request_times[cmd_id]
+                # Remove oldest commands (simple approach)
+                oldest_cmd_id = min(self.pending_commands.keys(), key=lambda k: self.pending_commands[k].timestamp)
+                del self.pending_commands[oldest_cmd_id]
                     
         except Exception as e:
             logger.error(f"Error in cleanup: {str(e)}")
@@ -648,28 +552,7 @@ class LuminaModbusClient:
             except queue.Empty:
                 break
 
-    def _handle_command_error(self, command_id: str, device_type: str, error_type: str) -> None:
-        """Handle command errors by emitting appropriate error responses."""
-        try:
-            # Store command in pending_commands if not already there
-            if command_id not in self.pending_commands:
-                self.pending_commands[command_id] = PendingCommand(
-                    id=command_id,
-                    device_type=device_type,
-                    timestamp=time.time(),
-                    response_length=0,  # Not relevant for errors
-                    timeout=1.0  # Default timeout
-                )
-            
-            # Emit error response
-            self._emit_error_response(command_id, device_type, error_type)
-            
-            # Clean up the pending command
-            if command_id in self.pending_commands:
-                del self.pending_commands[command_id]
-            
-        except Exception as e:
-            logger.info(f"Error handling command error: {str(e)}")
+    # Removed _handle_command_error (replaced by _handle_error)
 
     def get_health_status(self) -> dict:
         """Get client health status and statistics."""
