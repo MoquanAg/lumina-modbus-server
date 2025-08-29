@@ -89,7 +89,7 @@ class LuminaModbusClient:
         # Threading components (simplified: only 2 threads)
         self._running = True
         self.command_queue = queue.Queue(maxsize=command_queue_size)
-        self.pending_commands: Dict[str, PendingCommand] = {}
+        self.pending_commands: Dict[str, ModbusCommand] = {}
         self._port_locks = {}  # Single lock per port (simplified)
         
         # Connection details
