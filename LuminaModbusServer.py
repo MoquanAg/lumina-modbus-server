@@ -1,5 +1,5 @@
 """
-LuminaModbusServer: Hybrid implementation using asyncio for network and threading for serial.
+LuminaModbusServer: Clean threading implementation for parallel port processing.
 """
 
 import concurrent.futures
@@ -39,11 +39,7 @@ class LuminaModbusServer:
             for port in AVAILABLE_PORTS
         }
         
-        # Thread pool for serial operations
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(AVAILABLE_PORTS),
-            thread_name_prefix="serial_worker"
-        )
+        # Simplified: direct threading for port processing
         
         # Logging setup
         self.logger = LuminaLogger('LuminaModbusServer')

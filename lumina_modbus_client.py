@@ -33,7 +33,7 @@ class ModbusResponse:
     timestamp: float = 0.0  # Add timestamp field with default value
 
 class LuminaModbusClient:
-    _instances = {}  # Change from single instance to per-process instances
+    _instances = {}  # Per-process instances
     _lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
@@ -53,7 +53,7 @@ class LuminaModbusClient:
         self.is_connected = False
         self.event_emitter = ModbusEventEmitter()
         
-        # Threading components
+        # Threading components (simplified: only 2 threads)
         self._running = True
         self.command_queue = queue.Queue(maxsize=command_queue_size)
         self.pending_commands: Dict[str, PendingCommand] = {}
@@ -69,13 +69,10 @@ class LuminaModbusClient:
         self._last_command_time = 0
         self._command_interval = 0.001  # Reduce to 1ms
         
-        # Start worker threads
+        # Start worker threads (simplified: only 2 threads)
         self._threads = {
             'command': threading.Thread(target=self._process_commands, name="CommandProcessor", daemon=True),
-            'read': threading.Thread(target=self._read_responses, name="ResponseReader", daemon=True),
-            'cleanup': threading.Thread(target=self._cleanup_pending_commands, name="CommandCleaner", daemon=True),
-            'watchdog': threading.Thread(target=self._connection_watchdog, name="ConnectionWatchdog", daemon=True),
-            'monitor': threading.Thread(target=self._monitor_health, name="HealthMonitor", daemon=True)
+            'read': threading.Thread(target=self._read_responses, name="ResponseReader", daemon=True)
         }
         
         for thread in self._threads.values():
@@ -229,24 +226,29 @@ class LuminaModbusClient:
 
     def _check_socket_health(self) -> bool:
         """Check if socket is healthy and connected."""
-        if not self.socket:
-            return False
         try:
-            # Try to check socket state
-            return self.socket.fileno() != -1 and self.is_connected
-        except Exception:
+            if not self.socket or not self.is_connected:
+                return False
+            
+            # Try to get socket info to check if it's still valid
+            self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            return True
+        except:
             return False
 
     def _get_port_locks(self, port: str):
-        """Get or create locks for a specific port"""
+        """Get or create locks for a specific port."""
         if port not in self._port_locks:
             self._port_locks[port] = threading.Lock()
+        if port not in self._send_locks:
             self._send_locks[port] = threading.Lock()
+        if port not in self._recv_locks:
             self._recv_locks[port] = threading.Lock()
-        return (self._port_locks[port], self._send_locks[port], self._recv_locks[port])
+        
+        return self._port_locks[port], self._send_locks[port], self._recv_locks[port]
 
     def _process_commands(self) -> None:
-        """Process commands from the queue and send to server."""
+        """Process commands from the queue and send them to the server."""
         while self._running:
             try:
                 command = self.command_queue.get(timeout=0.1)
@@ -298,16 +300,31 @@ class LuminaModbusClient:
                     self._handle_command_error(command['id'], command['device_type'], 'error')
 
     def _read_responses(self) -> None:
-        """Read and process responses from the server."""
+        """Read and process responses from the server with integrated cleanup and health checks."""
         buffer = {}  # Separate buffer for each port
+        last_cleanup_time = time.time()
+        last_health_check = time.time()
+        
         while self._running:
             if not self.is_connected:
                 time.sleep(0.1)
                 continue
 
+            current_time = time.time()
+            
+            # Periodic cleanup of timed-out commands (every 1 second)
+            if current_time - last_cleanup_time > 1.0:
+                self._cleanup_timed_out_commands()
+                last_cleanup_time = current_time
+            
+            # Periodic health check (every 5 seconds)
+            if current_time - last_health_check > 5.0:
+                self._check_connection_health()
+                last_health_check = current_time
+
             try:
                 # First check for data without lock
-                ready = select.select([self.socket], [], [], 0.01)
+                ready = select.select([self.socket], [], [], 0.1)  # Increased timeout for periodic tasks
                 if not ready[0]:
                     continue
 
@@ -381,42 +398,32 @@ class LuminaModbusClient:
         except Exception as e:
             logger.info(f"Error handling response line: {str(e)}")
 
-    def _cleanup_pending_commands(self) -> None:
-        """Clean up timed-out pending commands."""
-        while self._running:
-            try:
-                current_time = time.time()
-                timed_out = [
-                    cmd_id for cmd_id, cmd in self.pending_commands.items()
-                    if cmd.timestamp > 0 and  # Only check commands that have been sent
-                    (current_time - cmd.timestamp) > (cmd.timeout + 0.5)  # Add small buffer
-                ]
-                
-                for cmd_id in timed_out:
-                    cmd_info = self.pending_commands[cmd_id]
-                    logger.warning(f"Command {cmd_id} timed out after {current_time - cmd_info.timestamp:.2f}s")
-                    self._emit_error_response(cmd_id, cmd_info.device_type, 'timeout')
-                    del self.pending_commands[cmd_id]
-                
-                time.sleep(0.5)  # Increased sleep time
-            except Exception as e:
-                logger.error(f"Error in command cleanup: {str(e)}")
+    def _cleanup_timed_out_commands(self) -> None:
+        """Clean up timed-out pending commands (integrated into read thread)."""
+        try:
+            current_time = time.time()
+            timed_out = [
+                cmd_id for cmd_id, cmd in self.pending_commands.items()
+                if cmd.timestamp > 0 and  # Only check commands that have been sent
+                (current_time - cmd.timestamp) > (cmd.timeout + 0.5)  # Add small buffer
+            ]
+            
+            for cmd_id in timed_out:
+                cmd_info = self.pending_commands[cmd_id]
+                logger.warning(f"Command {cmd_id} timed out after {current_time - cmd_info.timestamp:.2f}s")
+                self._emit_error_response(cmd_id, cmd_info.device_type, 'timeout')
+                del self.pending_commands[cmd_id]
+        except Exception as e:
+            logger.error(f"Error in cleanup: {str(e)}")
 
-    def _monitor_health(self) -> None:
-        """Monitor client health metrics."""
-        while self._running:
-            try:
-                queue_size = self.command_queue.qsize()
-                pending_count = len(self.pending_commands)
-                
-                if queue_size > self.command_queue.maxsize * 0.8:
-                    logger.warning(f"Command queue is {queue_size}/{self.command_queue.maxsize} full")
-                if pending_count > 100:
-                    logger.warning(f"High number of pending commands: {pending_count}")
-                
-                time.sleep(5)
-            except Exception as e:
-                logger.info(f"Error in health monitor: {str(e)}")
+    def _check_connection_health(self) -> None:
+        """Check connection health and reconnect if necessary (integrated into read thread)."""
+        try:
+            if not self.is_connected and self._host and self._port:
+                logger.info("Health check: attempting to reconnect...")
+                self._establish_connection()
+        except Exception as e:
+            logger.debug(f"Health check reconnection failed: {str(e)}")
 
     def _emit_error_response(self, command_id: str, device_type: str, status: str, timestamp: float = None) -> None:
         """Helper method to emit error responses."""
@@ -430,18 +437,6 @@ class LuminaModbusClient:
             status=status,
             timestamp=timestamp  # Add timestamp to error responses
         ))
-
-    def _connection_watchdog(self) -> None:
-        """Monitors connection health and reconnects if necessary"""
-        while self._running:
-            if not self.is_connected and self._host and self._port:
-                try:
-                    logger.info("Watchdog attempting to reconnect...")
-                    self._establish_connection()
-                except Exception as e:
-                    logger.info(f"Watchdog reconnection failed: {str(e)}")
-                    time.sleep(5)  # Wait before retry
-            time.sleep(1)  # Check connection every second
 
     def _attempt_reconnect(self) -> None:
         """Modified to use exponential backoff and maintain connection details"""
