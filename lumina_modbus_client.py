@@ -43,6 +43,13 @@ class PendingCommand:
     timeout: float
 
 @dataclass
+class ModbusError(Exception):
+    def __init__(self, error_type: str, message: str, command_id: str = None):
+        self.error_type = error_type
+        self.message = message
+        self.command_id = command_id
+        super().__init__(f"{error_type}: {message}")
+
 class ModbusResponse:
     command_id: str
     data: Optional[bytes]
@@ -80,9 +87,7 @@ class LuminaModbusClient:
         self.command_queue = queue.Queue(maxsize=command_queue_size)
         self.pending_commands: Dict[str, PendingCommand] = {}
         self._socket_lock = threading.Lock()
-        self._port_locks = {}  # Dict to store locks for each port
-        self._send_locks = {}  # Dict for send locks per port
-        self._recv_locks = {}  # Dict for receive locks per port
+        self._port_locks = {}  # Single lock per port (simplified)
         
         # Connection details
         self._host = None
@@ -114,7 +119,15 @@ class LuminaModbusClient:
             'timeouts': 0,
             'reconnections': 0,
             'last_command_time': 0,
-            'last_response_time': 0
+            'last_response_time': 0,
+            'errors': 0
+        }
+        
+        # Thread health monitoring
+        self.thread_health = {
+            'command_thread_alive': True,
+            'read_thread_alive': True,
+            'last_health_check': time.time()
         }
 
     def connect(self, host='127.0.0.1', port=8888):
@@ -311,16 +324,11 @@ class LuminaModbusClient:
         except:
             return False
 
-    def _get_port_locks(self, port: str):
-        """Get or create locks for a specific port."""
+    def _get_port_lock(self, port: str):
+        """Get or create lock for a specific port."""
         if port not in self._port_locks:
             self._port_locks[port] = threading.Lock()
-        if port not in self._send_locks:
-            self._send_locks[port] = threading.Lock()
-        if port not in self._recv_locks:
-            self._recv_locks[port] = threading.Lock()
-        
-        return self._port_locks[port], self._send_locks[port], self._recv_locks[port]
+        return self._port_locks[port]
 
     def _process_commands(self) -> None:
         """Process commands from the queue and send them to the server."""
@@ -328,7 +336,7 @@ class LuminaModbusClient:
             try:
                 command = self.command_queue.get(timeout=0.1)
                 port = command['command'].decode().split(':')[2]  # Extract port from command string
-                _, send_lock, _ = self._get_port_locks(port)
+                port_lock = self._get_port_lock(port)
                 logger.debug(f"Processing command from queue - ID: {command['id']}")
                 
                 # Check socket health before sending
@@ -346,7 +354,7 @@ class LuminaModbusClient:
                 
                 try:
                     if self.is_connected and self.socket:
-                        with send_lock:  # Use port-specific send lock
+                        with port_lock:  # Use port-specific lock
                             logger.debug(f"Sending command to socket - ID: {command['id']}")
                             self.socket.sendall(command['command'])
                             send_time = time.time()
@@ -398,7 +406,7 @@ class LuminaModbusClient:
             
             # Periodic health check
             if current_time - last_health_check > Config.HEALTH_CHECK_INTERVAL:
-                self._check_connection_health()
+                self._check_connection_health_and_reconnect()
                 last_health_check = current_time
 
             try:
@@ -421,9 +429,9 @@ class LuminaModbusClient:
                 except (IndexError, AttributeError) as e:
                     logger.warning(f"Failed to parse port from response: {data}, error: {e}")
                     continue
-                _, _, recv_lock = self._get_port_locks(port)
+                port_lock = self._get_port_lock(port)
                 
-                with recv_lock:  # Use port-specific receive lock
+                with port_lock:  # Use port-specific lock
                     if port not in buffer:
                         buffer[port] = ""
                     buffer[port] += data
@@ -540,28 +548,56 @@ class LuminaModbusClient:
         except Exception as e:
             logger.error(f"Error in cleanup: {str(e)}")
 
-    def _check_connection_health(self) -> None:
+    def _check_connection_health(self) -> bool:
+        """Real connection health check."""
+        try:
+            if not self.socket or not self.is_connected:
+                return False
+            
+            # Send ping command to server
+            ping_data = b'PING\n'
+            self.socket.send(ping_data)
+            
+            # Wait for pong response
+            ready = select.select([self.socket], [], [], 1.0)
+            if ready[0]:
+                response = self.socket.recv(10)
+                return response == b'PONG\n'
+            
+            return False
+        except Exception as e:
+            logger.debug(f"Health check failed: {str(e)}")
+            return False
+
+    def _check_connection_health_and_reconnect(self) -> None:
         """Check connection health and reconnect if necessary (integrated into read thread)."""
         try:
             if not self.is_connected and self._host and self._port:
                 logger.info("Health check: attempting to reconnect...")
                 self.stats['reconnections'] += 1
                 self._establish_connection()
+            elif self.is_connected and not self._check_connection_health():
+                logger.warning("Health check failed, reconnecting...")
+                self.stats['reconnections'] += 1
+                self._establish_connection()
         except Exception as e:
             logger.debug(f"Health check reconnection failed: {str(e)}")
 
-    def _emit_error_response(self, command_id: str, device_type: str, status: str, timestamp: float = None) -> None:
-        """Helper method to emit error responses."""
-        if timestamp is None:
-            timestamp = time.time()
-        
+    def _handle_error(self, command_id: str, device_type: str, error: ModbusError) -> None:
+        """Unified error handling for all error types."""
+        self.stats['errors'] = self.stats.get('errors', 0) + 1
         self.event_emitter.emit_response(ModbusResponse(
             command_id=command_id,
             data=None,
             device_type=device_type,
-            status=status,
-            timestamp=timestamp  # Add timestamp to error responses
+            status=error.error_type,
+            timestamp=time.time()
         ))
+
+    def _emit_error_response(self, command_id: str, device_type: str, status: str, timestamp: float = None) -> None:
+        """Helper method to emit error responses (backward compatibility)."""
+        error = ModbusError(status, f"Error: {status}", command_id)
+        self._handle_error(command_id, device_type, error)
 
     def _attempt_reconnect(self) -> None:
         """Modified to use exponential backoff and maintain connection details"""
@@ -638,11 +674,18 @@ class LuminaModbusClient:
     def get_health_status(self) -> dict:
         """Get client health status and statistics."""
         current_time = time.time()
+        
+        # Update thread health
+        self.thread_health['command_thread_alive'] = self._threads['command'].is_alive()
+        self.thread_health['read_thread_alive'] = self._threads['read'].is_alive()
+        self.thread_health['last_health_check'] = current_time
+        
         return {
             'is_connected': self.is_connected,
             'pending_commands': len(self.pending_commands),
             'queue_size': self.command_queue.qsize(),
             'stats': self.stats.copy(),
+            'thread_health': self.thread_health.copy(),
             'uptime': current_time - getattr(self, '_start_time', current_time),
             'last_command_age': current_time - self.stats['last_command_time'] if self.stats['last_command_time'] > 0 else None,
             'last_response_age': current_time - self.stats['last_response_time'] if self.stats['last_response_time'] > 0 else None,
