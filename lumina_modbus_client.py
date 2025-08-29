@@ -90,7 +90,6 @@ class LuminaModbusClient:
         self._running = True
         self.command_queue = queue.Queue(maxsize=command_queue_size)
         self.pending_commands: Dict[str, PendingCommand] = {}
-        self._socket_lock = threading.Lock()
         self._port_locks = {}  # Single lock per port (simplified)
         
         # Connection details
@@ -144,7 +143,9 @@ class LuminaModbusClient:
         """Internal method to establish the socket connection."""
         old_socket = None
         try:
-            with self._socket_lock:
+            # Use a default lock for socket operations (not port-specific)
+            default_lock = self._get_port_lock('default')
+            with default_lock:
                 # Store old socket for proper cleanup
                 if self.socket:
                     old_socket = self.socket
@@ -532,7 +533,9 @@ class LuminaModbusClient:
         self._running = False
         self.event_emitter.stop()
         
-        with self._socket_lock:
+        # Use default lock for socket cleanup
+        default_lock = self._get_port_lock('default')
+        with default_lock:
             if self.socket:
                 try:
                     self.socket.close()
