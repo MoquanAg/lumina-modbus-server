@@ -9,6 +9,7 @@ import string
 from dataclasses import dataclass
 import weakref
 import select
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,15 +33,16 @@ class ModbusResponse:
     timestamp: float = 0.0  # Add timestamp field with default value
 
 class LuminaModbusClient:
-    _instance = None
+    _instances = {}  # Change from single instance to per-process instances
     _lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
+        process_id = os.getpid()  # Get current process ID
         with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
-            return cls._instance
+            if process_id not in cls._instances:
+                cls._instances[process_id] = super().__new__(cls)
+                cls._instances[process_id]._initialized = False
+            return cls._instances[process_id]
 
     def __init__(self, reconnect_attempts: int = 3, command_queue_size: int = 1000):
         if self._initialized:
