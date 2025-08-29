@@ -11,6 +11,24 @@ import weakref
 import select
 import os
 
+# Configuration constants
+class Config:
+    # Timing constants
+    COMMAND_INTERVAL = 0.001  # Minimum time between commands (seconds)
+    CLEANUP_INTERVAL = 1.0    # How often to cleanup timed-out commands (seconds)
+    HEALTH_CHECK_INTERVAL = 5.0  # How often to check connection health (seconds)
+    SOCKET_TIMEOUT = 5.0      # Socket timeout (seconds)
+    READ_TIMEOUT = 0.1        # Timeout for socket reads (seconds)
+    
+    # Queue and memory limits
+    MAX_PENDING_COMMANDS = 1000  # Maximum number of pending commands
+    MAX_REQUEST_TIMES = 100      # Maximum number of request times to track
+    
+    # Retry settings
+    MAX_RECONNECT_ATTEMPTS = 3
+    RECONNECT_BASE_DELAY = 5    # Base delay for reconnection (seconds)
+    RECONNECT_MAX_DELAY = 15    # Maximum delay for reconnection (seconds)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -41,12 +59,16 @@ class LuminaModbusClient:
         with cls._lock:
             if process_id not in cls._instances:
                 cls._instances[process_id] = super().__new__(cls)
+                # Initialize immediately to prevent race condition
                 cls._instances[process_id]._initialized = False
+                cls._instances[process_id]._init_lock = threading.Lock()
             return cls._instances[process_id]
 
     def __init__(self, reconnect_attempts: int = 3, command_queue_size: int = 1000):
-        if self._initialized:
-            return
+        # Thread-safe initialization to prevent race conditions
+        with getattr(self, '_init_lock', threading.Lock()):
+            if getattr(self, '_initialized', False):
+                return
             
         # Basic initialization
         self.socket = None
@@ -67,7 +89,7 @@ class LuminaModbusClient:
         self._port = None
         self._reconnect_attempts = reconnect_attempts
         self._last_command_time = 0
-        self._command_interval = 0.001  # Reduce to 1ms
+        self._command_interval = Config.COMMAND_INTERVAL
         
         # Start worker threads (simplified: only 2 threads)
         self._threads = {
@@ -79,9 +101,21 @@ class LuminaModbusClient:
             thread.start()
         
         self._initialized = True
+        self._start_time = time.time()
         logger.info("LuminaModbusClient initialized")
         
         self.request_times = {}  # Add dictionary to track request creation times
+        
+        # Health monitoring
+        self.stats = {
+            'commands_sent': 0,
+            'commands_failed': 0,
+            'responses_received': 0,
+            'timeouts': 0,
+            'reconnections': 0,
+            'last_command_time': 0,
+            'last_response_time': 0
+        }
 
     def connect(self, host='127.0.0.1', port=8888):
         """Connect to the Modbus server."""
@@ -91,15 +125,15 @@ class LuminaModbusClient:
 
     def _establish_connection(self) -> bool:
         """Internal method to establish the socket connection."""
+        old_socket = None
         try:
             with self._socket_lock:
+                # Store old socket for proper cleanup
                 if self.socket:
-                    try:
-                        self.socket.close()
-                        logger.debug("Closed existing socket")
-                    except:
-                        pass
+                    old_socket = self.socket
+                    self.socket = None
                 
+                # Create new socket
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 
@@ -112,16 +146,36 @@ class LuminaModbusClient:
                     pass
                 
                 self.socket.connect((self._host, self._port))
-                self.socket.settimeout(5.0)
+                self.socket.settimeout(Config.SOCKET_TIMEOUT)
                 self.is_connected = True
                 logger.debug(f"Socket connected and timeout set to 5.0 seconds")
                 logger.info(f"Connected to server at {self._host}:{self._port}")
                 return True
                 
-        except Exception as e:
-            logger.error(f"Failed to connect: {str(e)}")
+        except socket.timeout:
+            logger.error(f"Connection timeout to {self._host}:{self._port}")
             self.is_connected = False
             return False
+        except socket.gaierror as e:
+            logger.error(f"DNS resolution failed for {self._host}:{self._port}: {str(e)}")
+            self.is_connected = False
+            return False
+        except ConnectionRefusedError:
+            logger.error(f"Connection refused by server at {self._host}:{self._port}")
+            self.is_connected = False
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error connecting to {self._host}:{self._port}: {str(e)}")
+            self.is_connected = False
+            return False
+        finally:
+            # Always close old socket to prevent leaks
+            if old_socket:
+                try:
+                    old_socket.close()
+                    logger.debug("Closed old socket")
+                except Exception as e:
+                    logger.warning(f"Error closing old socket: {str(e)}")
 
     def send_command(self, device_type: str, port: str, command: bytes, **kwargs) -> str:
         """
@@ -136,6 +190,27 @@ class LuminaModbusClient:
         Returns:
             str: Command ID for tracking the response
         """
+        # Input validation
+        if not isinstance(device_type, str) or not device_type.strip():
+            raise ValueError("device_type must be a non-empty string")
+        if not isinstance(port, str) or not port.strip():
+            raise ValueError("port must be a non-empty string")
+        if not isinstance(command, bytes) or len(command) == 0:
+            raise ValueError("command must be non-empty bytes")
+        
+        # Validate kwargs
+        baudrate = kwargs.get('baudrate', 9600)
+        if not isinstance(baudrate, int) or baudrate <= 0:
+            raise ValueError("baudrate must be a positive integer")
+        
+        response_length = kwargs.get('response_length', 0)
+        if not isinstance(response_length, int) or response_length < 0:
+            raise ValueError("response_length must be a non-negative integer")
+        
+        timeout = kwargs.get('timeout', 5.0)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("timeout must be a positive number")
+        
         # Generate unique command ID
         truncated_hex = command.hex()[:12]
         random_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=2))
@@ -283,11 +358,15 @@ class LuminaModbusClient:
                                 logger.debug(f"Updated timestamp for command {command['id']} to {send_time}")
                             
                             logger.info(f"Successfully sent command - ID: {command['id']}")
+                            self.stats['commands_sent'] += 1
+                            self.stats['last_command_time'] = time.time()
                     else:
                         logger.error(f"Socket not connected, cannot send command - ID: {command['id']}")
+                        self.stats['commands_failed'] += 1
                         self._handle_command_error(command['id'], command['device_type'], 'send_failed')
                 except Exception as e:
                     logger.error(f"Failed to send command {command['id']}: {str(e)}")
+                    self.stats['commands_failed'] += 1
                     self._handle_command_error(command['id'], command['device_type'], 'send_failed')
                 
                 self.command_queue.task_done()
@@ -312,19 +391,19 @@ class LuminaModbusClient:
 
             current_time = time.time()
             
-            # Periodic cleanup of timed-out commands (every 1 second)
-            if current_time - last_cleanup_time > 1.0:
+            # Periodic cleanup of timed-out commands
+            if current_time - last_cleanup_time > Config.CLEANUP_INTERVAL:
                 self._cleanup_timed_out_commands()
                 last_cleanup_time = current_time
             
-            # Periodic health check (every 5 seconds)
-            if current_time - last_health_check > 5.0:
+            # Periodic health check
+            if current_time - last_health_check > Config.HEALTH_CHECK_INTERVAL:
                 self._check_connection_health()
                 last_health_check = current_time
 
             try:
                 # First check for data without lock
-                ready = select.select([self.socket], [], [], 0.1)  # Increased timeout for periodic tasks
+                ready = select.select([self.socket], [], [], Config.READ_TIMEOUT)
                 if not ready[0]:
                     continue
 
@@ -333,8 +412,15 @@ class LuminaModbusClient:
                 if not data:
                     raise ConnectionError("Connection lost")
                 
-                # Extract port from response (assuming it's in the command ID format)
-                port = data.split('_')[0]  # First part of command ID is port name
+                # Extract port from response with validation
+                try:
+                    port = data.split('_')[0]  # First part of command ID is port name
+                    if not port or len(port) == 0:
+                        logger.warning(f"Invalid port in response: {data}")
+                        continue
+                except (IndexError, AttributeError) as e:
+                    logger.warning(f"Failed to parse port from response: {data}, error: {e}")
+                    continue
                 _, _, recv_lock = self._get_port_locks(port)
                 
                 with recv_lock:  # Use port-specific receive lock
@@ -357,11 +443,20 @@ class LuminaModbusClient:
     def _handle_response_line(self, response: str) -> None:
         """Process a single response line from the server."""
         try:
+            # Validate response format
+            if not isinstance(response, str) or not response.strip():
+                logger.warning("Empty or invalid response received")
+                return
+            
             parts = response.split(':')
             if len(parts) < 2:
+                logger.warning(f"Invalid response format (too few parts): {response}")
                 return
             
             response_id = parts[0]
+            if not response_id or len(response_id.strip()) == 0:
+                logger.warning(f"Invalid response ID: {response}")
+                return
             
             # Calculate total time if we have the creation time
             if response_id in self.request_times:
@@ -388,6 +483,8 @@ class LuminaModbusClient:
                             status='success',
                             timestamp=timestamp
                         ))
+                        self.stats['responses_received'] += 1
+                        self.stats['last_response_time'] = time.time()
                     except ValueError:
                         self._emit_error_response(response_id, command_info.device_type, 'invalid_response', timestamp)
                 
@@ -399,9 +496,11 @@ class LuminaModbusClient:
             logger.info(f"Error handling response line: {str(e)}")
 
     def _cleanup_timed_out_commands(self) -> None:
-        """Clean up timed-out pending commands (integrated into read thread)."""
+        """Clean up timed-out pending commands and manage memory (integrated into read thread)."""
         try:
             current_time = time.time()
+            
+            # Clean up timed-out commands
             timed_out = [
                 cmd_id for cmd_id, cmd in self.pending_commands.items()
                 if cmd.timestamp > 0 and  # Only check commands that have been sent
@@ -411,8 +510,33 @@ class LuminaModbusClient:
             for cmd_id in timed_out:
                 cmd_info = self.pending_commands[cmd_id]
                 logger.warning(f"Command {cmd_id} timed out after {current_time - cmd_info.timestamp:.2f}s")
+                self.stats['timeouts'] += 1
                 self._emit_error_response(cmd_id, cmd_info.device_type, 'timeout')
                 del self.pending_commands[cmd_id]
+            
+            # Memory management: limit pending commands
+            if len(self.pending_commands) > Config.MAX_PENDING_COMMANDS:
+                # Remove oldest commands
+                sorted_commands = sorted(
+                    self.pending_commands.items(),
+                    key=lambda x: x[1].timestamp
+                )
+                to_remove = len(self.pending_commands) - Config.MAX_PENDING_COMMANDS
+                for cmd_id, _ in sorted_commands[:to_remove]:
+                    logger.warning(f"Removing old pending command due to memory limit: {cmd_id}")
+                    del self.pending_commands[cmd_id]
+            
+            # Memory management: limit request times tracking
+            if len(self.request_times) > Config.MAX_REQUEST_TIMES:
+                # Remove oldest entries
+                sorted_times = sorted(
+                    self.request_times.items(),
+                    key=lambda x: x[1]
+                )
+                to_remove = len(self.request_times) - Config.MAX_REQUEST_TIMES
+                for cmd_id, _ in sorted_times[:to_remove]:
+                    del self.request_times[cmd_id]
+                    
         except Exception as e:
             logger.error(f"Error in cleanup: {str(e)}")
 
@@ -421,6 +545,7 @@ class LuminaModbusClient:
         try:
             if not self.is_connected and self._host and self._port:
                 logger.info("Health check: attempting to reconnect...")
+                self.stats['reconnections'] += 1
                 self._establish_connection()
         except Exception as e:
             logger.debug(f"Health check reconnection failed: {str(e)}")
@@ -509,4 +634,21 @@ class LuminaModbusClient:
             
         except Exception as e:
             logger.info(f"Error handling command error: {str(e)}")
+
+    def get_health_status(self) -> dict:
+        """Get client health status and statistics."""
+        current_time = time.time()
+        return {
+            'is_connected': self.is_connected,
+            'pending_commands': len(self.pending_commands),
+            'queue_size': self.command_queue.qsize(),
+            'stats': self.stats.copy(),
+            'uptime': current_time - getattr(self, '_start_time', current_time),
+            'last_command_age': current_time - self.stats['last_command_time'] if self.stats['last_command_time'] > 0 else None,
+            'last_response_age': current_time - self.stats['last_response_time'] if self.stats['last_response_time'] > 0 else None,
+            'success_rate': (
+                self.stats['responses_received'] / max(self.stats['commands_sent'], 1) * 100
+                if self.stats['commands_sent'] > 0 else 0
+            )
+        }
 
