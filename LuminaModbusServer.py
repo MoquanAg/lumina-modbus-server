@@ -15,7 +15,7 @@ import threading
 import socket
 import queue
 
-AVAILABLE_PORTS = ['/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4']
+AVAILABLE_PORTS = ['/dev/ttyAMA0', '/dev/ttyAMA1', '/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4']
 
 @dataclass
 class SerialConnection:
