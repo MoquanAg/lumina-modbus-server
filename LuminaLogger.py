@@ -226,15 +226,16 @@ class LuminaLogger:
         self.check_and_rotate_log()
         self.logger.warning(message)
 
-    def error(self, message):
+    def error(self, message, exc_info=None):
         """
         Log an error level message.
 
         Args:
             message (str): Error message to log
+            exc_info (bool): If True, includes exception traceback information
         """
         self.check_and_rotate_log()
-        self.logger.error(message)
+        self.logger.error(message, exc_info=exc_info)
 
     def critical(self, message):
         """
