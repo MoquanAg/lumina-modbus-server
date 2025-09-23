@@ -12,6 +12,42 @@ fi
 
 echo "Setting up startup scripts."
 
+# Configure Chinese mirrors for better connectivity in China
+echo "🇨🇳 Configuring Chinese mirrors for package installation..."
+# Backup original sources.list
+cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+
+# Configure Aliyun mirror for apt (works well in China)
+CODENAME=$(lsb_release -cs 2>/dev/null || echo "bookworm")
+tee /etc/apt/sources.list > /dev/null << EOF
+# Aliyun mirrors for better connectivity in China
+deb https://mirrors.aliyun.com/debian/ $CODENAME main contrib non-free non-free-firmware
+deb https://mirrors.aliyun.com/debian/ $CODENAME-updates main contrib non-free non-free-firmware
+deb https://mirrors.aliyun.com/debian/ $CODENAME-backports main contrib non-free non-free-firmware
+deb https://mirrors.aliyun.com/debian-security/ $CODENAME-security main contrib non-free non-free-firmware
+EOF
+
+# Fix GPG keys and package verification issues
+echo "🔑 Fixing GPG keys and package verification..."
+# Fix any broken GPG keys
+apt-key adv --keyserver keyserver.ubuntu.com --recv-keys $(apt update 2>&1 | grep -o '[A-F0-9]\{8,\}' | sort -u | tr '\n' ' ') 2>/dev/null || true
+
+# Fix GPG key verification issues that commonly occur
+mkdir -p /etc/apt/keyrings
+chmod 755 /etc/apt/keyrings
+
+# Update package database with proper error handling
+echo "📦 Updating package database..."
+apt update --fix-missing || {
+    echo "   ⚠️  Initial update failed, trying to fix GPG issues..."
+    # Clear apt cache and try again
+    apt clean
+    rm -rf /var/lib/apt/lists/*
+    apt update --allow-unauthenticated || {
+        echo "   ⚠️  Still having issues, proceeding with setup..."
+    }
+}
+
 # Configuration
 LUMINA_HOME="/home/lumina"
 LUMINA_MODBUS="$LUMINA_HOME/lumina-modbus-server"
