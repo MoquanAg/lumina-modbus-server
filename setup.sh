@@ -101,4 +101,22 @@ EOF
 
 echo "Added lxterminal autostart entry for Lumina Modbus."
 
+# Fix SSH key permissions for security
+echo "🔐 Fixing SSH key permissions..."
+if [ -f /home/lumina/.ssh/id_rsa ]; then
+    chmod 600 /home/lumina/.ssh/id_rsa
+    chown lumina:lumina /home/lumina/.ssh/id_rsa
+    echo "   ✅ SSH private key permissions fixed (600)"
+fi
+if [ -f /home/lumina/.ssh/id_rsa.pub ]; then
+    chmod 644 /home/lumina/.ssh/id_rsa.pub
+    chown lumina:lumina /home/lumina/.ssh/id_rsa.pub
+    echo "   ✅ SSH public key permissions fixed (644)"
+fi
+if [ -d /home/lumina/.ssh ]; then
+    chmod 700 /home/lumina/.ssh
+    chown lumina:lumina /home/lumina/.ssh
+    echo "   ✅ SSH directory permissions fixed (700)"
+fi
+
 echo "Setup complete."
