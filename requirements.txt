@@ -1,5 +1,5 @@
 asyncio==3.4.3
 psutil==6.1.1
+pymodbus==3.11.3
 pyserial==3.5
 pyserial-asyncio==0.6
-pymodbus>=3.6.0

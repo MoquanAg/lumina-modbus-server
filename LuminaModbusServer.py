@@ -139,21 +139,7 @@ class LuminaModbusServer:
         client_id = id(client_socket)
         self.logger.info(f"New client connected: {client_id} from {address}")
         
-        # Close existing PyModbus connections for clean state
-        for port in AVAILABLE_PORTS:
-            for baudrate, conn in list(self.pymodbus_connections.get(port, {}).items()):
-                try:
-                    # Schedule close in the connection's event loop
-                    if conn.event_loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self._close_pymodbus_client(conn.client),
-                            conn.event_loop
-                        )
-                    self.logger.info(f"Closed PyModbus connection on {port} at {baudrate} baud")
-                except Exception as e:
-                    self.logger.error(f"Error closing PyModbus connection on {port}: {str(e)}")
-            self.pymodbus_connections[port].clear()
-        
+        # PyModbus connections are shared across all clients - no need to close them
         self.clients.add(client_id)
         self.client_pending_commands[client_id] = set()
         
@@ -317,7 +303,53 @@ class LuminaModbusServer:
                 await asyncio.sleep(conn.min_command_spacing - time_since_last)
             
             # Execute based on function code
-            if function_code == 0x03:  # Read Holding Registers
+            if function_code == 0x01:  # Read Coils
+                coil_address = struct.unpack('>H', command[2:4])[0]
+                coil_count = struct.unpack('>H', command[4:6])[0]
+                
+                port_logger.info(
+                    f"Read Coils: slave={hex(slave_addr)}, "
+                    f"addr={hex(coil_address)}, count={coil_count}"
+                )
+                
+                response = await client.read_coils(
+                    address=coil_address,
+                    count=coil_count,
+                    device_id=slave_addr
+                )
+                
+                if response.isError():
+                    raise Exception(f"Modbus error: {response}")
+                
+                # Convert bits to bytes
+                response_bytes = self._coils_response_to_bytes(
+                    slave_addr, function_code, response.bits
+                )
+                
+            elif function_code == 0x02:  # Read Discrete Inputs
+                input_address = struct.unpack('>H', command[2:4])[0]
+                input_count = struct.unpack('>H', command[4:6])[0]
+                
+                port_logger.info(
+                    f"Read Discrete Inputs: slave={hex(slave_addr)}, "
+                    f"addr={hex(input_address)}, count={input_count}"
+                )
+                
+                response = await client.read_discrete_inputs(
+                    address=input_address,
+                    count=input_count,
+                    device_id=slave_addr
+                )
+                
+                if response.isError():
+                    raise Exception(f"Modbus error: {response}")
+                
+                # Convert bits to bytes
+                response_bytes = self._coils_response_to_bytes(
+                    slave_addr, function_code, response.bits
+                )
+                
+            elif function_code == 0x03:  # Read Holding Registers
                 register_address = struct.unpack('>H', command[2:4])[0]
                 register_count = struct.unpack('>H', command[4:6])[0]
                 
@@ -329,7 +361,7 @@ class LuminaModbusServer:
                 response = await client.read_holding_registers(
                     address=register_address,
                     count=register_count,
-                    slave=slave_addr
+                    device_id=slave_addr
                 )
                 
                 if response.isError():
@@ -352,7 +384,7 @@ class LuminaModbusServer:
                 response = await client.write_register(
                     address=register_address,
                     value=register_value,
-                    slave=slave_addr
+                    device_id=slave_addr
                 )
                 
                 if response.isError():
@@ -360,6 +392,65 @@ class LuminaModbusServer:
                 
                 # Echo back the write command as per Modbus spec
                 response_bytes = command  # Write response echoes the request
+                
+            elif function_code == 0x05:  # Write Single Coil
+                coil_address = struct.unpack('>H', command[2:4])[0]
+                coil_value_raw = struct.unpack('>H', command[4:6])[0]
+                coil_value = bool(coil_value_raw == 0xFF00)  # 0xFF00 = ON, 0x0000 = OFF
+                
+                port_logger.info(
+                    f"Write Coil: slave={hex(slave_addr)}, "
+                    f"addr={hex(coil_address)}, value={coil_value}"
+                )
+                
+                response = await client.write_coil(
+                    address=coil_address,
+                    value=coil_value,
+                    device_id=slave_addr
+                )
+                
+                if response.isError():
+                    raise Exception(f"Modbus error: {response}")
+                
+                # Echo back the write command as per Modbus spec
+                response_bytes = command
+                
+            elif function_code == 0x0F:  # Write Multiple Coils
+                coil_address = struct.unpack('>H', command[2:4])[0]
+                coil_count = struct.unpack('>H', command[4:6])[0]
+                byte_count = command[6]
+                
+                # Extract coil values from bytes
+                coil_values = []
+                for byte_idx in range(byte_count):
+                    byte_val = command[7 + byte_idx]
+                    for bit_idx in range(8):
+                        if len(coil_values) < coil_count:
+                            coil_values.append(bool((byte_val >> bit_idx) & 1))
+                
+                port_logger.info(
+                    f"Write Multiple Coils: slave={hex(slave_addr)}, "
+                    f"addr={hex(coil_address)}, count={coil_count}"
+                )
+                
+                response = await client.write_coils(
+                    address=coil_address,
+                    values=coil_values,
+                    device_id=slave_addr
+                )
+                
+                if response.isError():
+                    raise Exception(f"Modbus error: {response}")
+                
+                # Response format: slave + function + addr(2) + count(2) + crc(2)
+                response_bytes = struct.pack(
+                    '>BBHH',
+                    slave_addr,
+                    function_code,
+                    coil_address,
+                    coil_count
+                )
+                response_bytes += self._calculate_crc(response_bytes)
                 
             elif function_code == 0x10:  # Write Multiple Registers
                 register_address = struct.unpack('>H', command[2:4])[0]
@@ -381,7 +472,7 @@ class LuminaModbusServer:
                 response = await client.write_registers(
                     address=register_address,
                     values=values,
-                    slave=slave_addr
+                    device_id=slave_addr
                 )
                 
                 if response.isError():
@@ -480,6 +571,31 @@ class LuminaModbusServer:
         
         return response
 
+    def _coils_response_to_bytes(self, slave_addr: int, function_code: int, bits: list) -> bytes:
+        """
+        Convert PyModbus coil response (bits) back to raw Modbus RTU bytes.
+        
+        Format: [slave_addr, function_code, byte_count, coil_data..., crc_low, crc_high]
+        Coils are packed 8 per byte, LSB first.
+        """
+        # Pack bits into bytes (8 bits per byte, LSB first)
+        coil_bytes = []
+        for i in range(0, len(bits), 8):
+            byte_val = 0
+            for bit_idx in range(8):
+                if i + bit_idx < len(bits) and bits[i + bit_idx]:
+                    byte_val |= (1 << bit_idx)
+            coil_bytes.append(byte_val)
+        
+        byte_count = len(coil_bytes)
+        response = struct.pack('BBB', slave_addr, function_code, byte_count)
+        response += bytes(coil_bytes)
+        
+        # Add CRC
+        response += self._calculate_crc(response)
+        
+        return response
+
     def _calculate_crc(self, data: bytes) -> bytes:
         """Calculate Modbus CRC16"""
         crc = 0xFFFF
@@ -510,15 +626,17 @@ class LuminaModbusServer:
             
             try:
                 command_info['socket'].send(message.encode())
+                # Use shortened ID for logging readability
                 command_parts = command_info['command_id'].split('_')
-                command_id = '_'.join(command_parts[:-3])
-                self.logger.debug(f"Response for {command_id}: {response_hex}")
+                short_command_id = '_'.join(command_parts[:-3])
+                self.logger.debug(f"Response for {short_command_id}: {response_hex}")
             except (socket.error, IOError) as e:
                 self.logger.debug(f"Socket error while sending response: {e}")
                 return
             
+            # Remove from pending using FULL command_id (must match what was added)
             if client_id in self.client_pending_commands:
-                self.client_pending_commands[client_id].discard(command_id)
+                self.client_pending_commands[client_id].discard(command_info['command_id'])
         except Exception as e:
             self.logger.error(f"Failed to send response: {str(e)}")
 
@@ -539,6 +657,11 @@ class LuminaModbusServer:
                 self.logger.debug(f"Sent error to client {client_id}: {message.strip()}")
             except (socket.error, IOError) as e:
                 self.logger.debug(f"Socket error while sending error: {e}")
+                return
+            
+            # Remove from pending set (error is also a completed command)
+            if client_id in self.client_pending_commands:
+                self.client_pending_commands[client_id].discard(command_info['command_id'])
         except Exception as e:
             self.logger.error(f"Failed to send error: {str(e)}")
 

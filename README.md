@@ -2,6 +2,10 @@
 
 **A standalone TCP service that provides multi-process access to Modbus RTU serial devices.**
 
+This repository contains:
+1. **LuminaModbusServer** - The PyModbus-based TCP server (runs as a service)
+2. **Client Templates** - Production-ready client code in `examples/client/` (copy to your projects)
+
 ## What It Does
 
 Solves the "port already open" problem when multiple processes need to talk to serial Modbus devices:
@@ -28,12 +32,21 @@ Solves the "port already open" problem when multiple processes need to talk to s
 
 ## Features
 
-✅ **Multi-process access** - Run main.py, sensor_manager.py, and debug scripts simultaneously  
+### Server Features
+✅ **Multi-process access** - Multiple processes connect to one serial port  
 ✅ **PyModbus powered** - Robust timing, CRC, retries handled automatically  
-✅ **Zero client changes** - Existing lumina-edge sensors work as-is  
 ✅ **Simple protocol** - Text-based TCP commands (telnet-friendly)  
 ✅ **Auto-reconnection** - Handles serial port recovery  
-✅ **Production ready** - Systemd service with logging
+✅ **Production ready** - Systemd service with logging  
+✅ **Dynamic connection pooling** - Per-port/baudrate connection management
+
+### Client Templates (examples/client/)
+✅ **Production-ready client** - Copy and use in your projects  
+✅ **Dual API** - Both async event-driven and synchronous blocking  
+✅ **High-level Modbus** - PyModbus-style API (read/write registers)  
+✅ **Low-level commands** - Full control for custom protocols  
+✅ **Well-documented** - Comprehensive README with examples  
+✅ **Battle-tested** - Synced from production lumina-edge code
 
 ## Quick Start
 
@@ -47,13 +60,15 @@ pip install -r requirements.txt
 ### 2. Test Locally
 
 ```bash
-# Terminal 1: Start server
+# Start server
 python3 LuminaModbusServer.py
 
-# Terminal 2: Test with your sensors
-cd ~/lumina-edge
-python3 sensors/thc.py
+# Test with telnet (in another terminal)
+telnet 127.0.0.1 8888
+test:THC:/dev/ttyAMA1:9600:010300000002C40B:9:0.5
 ```
+
+> **Note:** For production clients, see the [Client Integration](#client-integration) section below.
 
 ### 3. Install as System Service (Recommended)
 
@@ -87,12 +102,14 @@ sudo systemctl start lumina-modbus-server
 sudo systemctl status lumina-modbus-server
 ```
 
-## Client Usage
+## Client Integration
 
-**No code changes needed in lumina-edge!** Your existing sensors already use LuminaModbusClient:
+### For Existing lumina-edge Projects
+
+**No code changes needed!** Your existing sensors already use LuminaModbusClient:
 
 ```python
-# In lumina-edge/sensors/thc.py - Works as-is!
+# In lumina-edge/communication/modbus/client.py - Works as-is!
 from communication.modbus.client import LuminaModbusClient
 
 client = LuminaModbusClient()
@@ -111,21 +128,97 @@ command_id = client.send_command(
 # Response comes via event emitter (same as always)
 ```
 
+### For New Projects
+
+Copy the client templates from `examples/client/` to your project:
+
+```bash
+# Copy client files to your project
+cp examples/client/lumina_modbus_client.py your_project/
+cp examples/client/lumina_modbus_event_emitter.py your_project/
+```
+
+See `examples/client/README.md` for complete documentation and usage examples.
+
+#### Quick Example
+
+```python
+from lumina_modbus_client import LuminaModbusClient
+
+# Initialize and connect
+client = LuminaModbusClient()
+client.connect(host='127.0.0.1', port=8888)
+
+# High-level Modbus API (synchronous)
+response = client.read_holding_registers(
+    port='/dev/ttyAMA3',
+    address=0x0000,
+    count=2,
+    slave_addr=0x01,
+    baudrate=9600
+)
+
+if not response.isError():
+    print(f"Register values: {response.registers}")
+```
+
+#### Features of the Client Templates
+
+✅ **Async event-driven** - Subscribe to device responses  
+✅ **Synchronous API** - Blocking calls for simple use cases  
+✅ **High-level Modbus** - `read_holding_registers()`, `write_register()`, etc.  
+✅ **Low-level commands** - Full control with `send_command()`  
+✅ **Auto-reconnect** - Handles connection failures  
+✅ **Thread-safe** - Multiple concurrent commands  
+✅ **Per-port isolation** - Parallel operations on different ports
+
+See `examples/client/README.md` for detailed documentation.
+
 ## TCP Protocol
 
-Simple text-based format (for debugging or custom clients):
+Simple text-based format (telnet-friendly for debugging):
+
+### Request Format
 
 ```text
-REQUEST:
-command_id:device_type:port:baudrate:command_hex:response_length:timeout
-
-EXAMPLE:
-test:THC:/dev/ttyAMA1:9600:010300000002C40B:9:0.5
-
-RESPONSE:
-OK:command_id:response_hex
-ERROR:command_id:error_message
+command_id:device_type:port:baudrate:command_hex:response_length[:timeout]\n
 ```
+
+**Fields:**
+- `command_id` - Unique identifier for tracking responses
+- `device_type` - Device type label (e.g., 'THC', 'EC', 'MODBUS')
+- `port` - Serial port path (e.g., '/dev/ttyAMA1')
+- `baudrate` - Serial baudrate (e.g., 9600, 4800)
+- `command_hex` - Command bytes in hex format (CRC included)
+- `response_length` - Expected response length in bytes
+- `timeout` - Optional timeout in seconds (default: 5.0)
+
+**Example:**
+```text
+test123:THC:/dev/ttyAMA1:9600:010300000002C40B:9:0.5
+```
+
+### Response Format
+
+```text
+command_id:response_hex:timestamp\n
+```
+
+**Success Example:**
+```text
+test123:0103040064000012AB:1732467890.123
+```
+
+**Error Example:**
+```text
+test123:ERROR:timeout:1732467890.456
+```
+
+**Error Types:**
+- `timeout` - Command timed out waiting for response
+- `serial_error` - Serial port communication failure
+- `invalid_port` - Port not available or doesn't exist
+- `connection_failed` - PyModbus connection failure
 
 ### Manual Testing
 
@@ -133,6 +226,7 @@ ERROR:command_id:error_message
 # Test with telnet
 telnet 127.0.0.1 8888
 test:THC:/dev/ttyAMA1:9600:010300000002C40B:9:0.5
+# Press Enter and wait for response
 ```
 
 ## Architecture
@@ -239,43 +333,65 @@ sudo journalctl -u lumina-modbus-server -n 50
 
 ## Testing
 
-Run the test suite:
+### Manual Testing with Telnet
 
 ```bash
-cd ~/lumina-modbus-server
-python3 test_pymodbus_server.py
+# Connect to server
+telnet 127.0.0.1 8888
+
+# Send a test command
+test:THC:/dev/ttyAMA1:9600:010300000002C40B:9:0.5
+
+# Expected response format:
+# command_id:response_hex:timestamp
+# OR
+# command_id:ERROR:error_type:timestamp
 ```
 
-Expected output:
-```
-✓ PASS: Server Import
-✓ PASS: Server Startup
-✓ PASS: Client Connection
-🎉 All tests passed!
-```
+### Testing with Client Library
+
+See `examples/client/README.md` for complete client usage examples.
 
 ## Configuration
 
 ### Serial Ports
 
-Configure in `LuminaModbusServer.py`:
+Available ports are configured in `LuminaModbusServer.py`:
 
 ```python
-# Default ports
-self.available_ports = {
-    "/dev/ttyAMA1": None,
-    "/dev/ttyAMA2": None,
-    "/dev/ttyAMA3": None,
-    "/dev/ttyAMA4": None,
-}
+# Default available ports (Raspberry Pi)
+AVAILABLE_PORTS = [
+    '/dev/ttyAMA0',
+    '/dev/ttyAMA1', 
+    '/dev/ttyAMA2',
+    '/dev/ttyAMA3',
+    '/dev/ttyAMA4'
+]
 ```
+
+The server dynamically manages connections per port/baudrate combination.
 
 ### TCP Server
 
 ```python
-# Default settings
+# Default settings in __main__
 HOST = "127.0.0.1"  # Localhost only (secure)
 PORT = 8888         # TCP port
+MAX_QUEUE = 100     # Command queue size per port
+TIMEOUT = 30        # Request timeout (seconds)
+```
+
+To change settings, edit the bottom of `LuminaModbusServer.py`:
+
+```python
+if __name__ == '__main__':
+    server = LuminaModbusServer(
+        host='0.0.0.0',      # Listen on all interfaces
+        port=8888,
+        max_queue_size=200,
+        request_timeout=60
+    )
+    server.start()
 ```
 
 ## Requirements
@@ -309,8 +425,25 @@ See `requirements.txt` for complete list.
 
 MIT License - see LICENSE file for details.
 
+## Repository Structure
+
+```
+lumina-modbus-server/
+├── LuminaModbusServer.py       # Main server (PyModbus-based)
+├── LuminaLogger.py             # Server logging utilities
+├── requirements.txt            # Python dependencies
+├── setup.sh                    # Installation script
+├── start_modbus_server.sh      # Server startup script
+└── examples/
+    └── client/
+        ├── README.md                      # Comprehensive client docs
+        ├── lumina_modbus_client.py        # Client template (copy to your project)
+        └── lumina_modbus_event_emitter.py # Event emitter template
+```
+
 ---
 
-**Questions?** Check the test files for usage examples:
-- `test_pymodbus_server.py` - Server test suite
-- `thc.py` - Real sensor example
+**Questions?** 
+- Server usage: See this README
+- Client integration: See `examples/client/README.md`
+- Protocol details: See [TCP Protocol](#tcp-protocol) section above
