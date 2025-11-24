@@ -61,7 +61,7 @@ pip install -r requirements.txt
 
 ```bash
 # Start server
-python3 LuminaModbusServer.py
+python main.py
 
 # Test with telnet (in another terminal)
 telnet 127.0.0.1 8888
@@ -85,7 +85,7 @@ After=network.target
 Type=simple
 User=lumina
 WorkingDirectory=/home/lumina/lumina-modbus-server
-ExecStart=/usr/bin/python3 LuminaModbusServer.py
+ExecStart=/usr/bin/python main.py
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -259,7 +259,7 @@ The server runs **separately** from lumina-edge because:
 - Debug scripts need to run while system is live
 - Systemd manages reliability (auto-restart, logging)
 
-**Important:** Never copy `LuminaModbusServer.py` into lumina-edge. They communicate via TCP, not shared code.
+**Important:** Never copy `main.py` into lumina-edge. They communicate via TCP, not shared code.
 
 ## Management
 
@@ -356,7 +356,7 @@ See `examples/client/README.md` for complete client usage examples.
 
 ### Serial Ports
 
-Available ports are configured in `LuminaModbusServer.py`:
+Available ports are configured in `main.py`:
 
 ```python
 # Default available ports (Raspberry Pi)
@@ -381,7 +381,7 @@ MAX_QUEUE = 100     # Command queue size per port
 TIMEOUT = 30        # Request timeout (seconds)
 ```
 
-To change settings, edit the bottom of `LuminaModbusServer.py`:
+To change settings, edit the bottom of `main.py`:
 
 ```python
 if __name__ == '__main__':
@@ -429,7 +429,7 @@ MIT License - see LICENSE file for details.
 
 ```
 lumina-modbus-server/
-├── LuminaModbusServer.py       # Main server (PyModbus-based)
+├── main.py                     # Main server (PyModbus-based)
 ├── LuminaLogger.py             # Server logging utilities
 ├── requirements.txt            # Python dependencies
 ├── setup.sh                    # Installation script
