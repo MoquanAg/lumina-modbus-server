@@ -74,7 +74,7 @@ echo "Setting up Python 3.11 virtual environment."
 
 # Set up Python 3.11 virtual environment
 cd "$LUMINA_MODBUS"
-sudo -u lumina python3.11 -m venv "$VENV_PATH"
+sudo -u lumina python -m venv "$VENV_PATH"
 source "$VENV_PATH/bin/activate"
 sudo -u lumina "$VENV_PATH/bin/python" -m pip install --upgrade pip
 
