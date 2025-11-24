@@ -27,6 +27,16 @@ deb https://mirrors.aliyun.com/debian/ $CODENAME-backports main contrib non-free
 deb https://mirrors.aliyun.com/debian-security/ $CODENAME-security main contrib non-free non-free-firmware
 EOF
 
+# Clean up mismatched Raspbian repository files
+echo "🧹 Checking for mismatched Raspbian repositories..."
+if [ -f /etc/apt/sources.list.d/raspi.list ]; then
+    # Check if the raspi.list contains a different codename than current system
+    if grep -q "raspbian" /etc/apt/sources.list.d/raspi.list && ! grep -q "$CODENAME" /etc/apt/sources.list.d/raspi.list; then
+        echo "   Found mismatched Raspbian repository, disabling it..."
+        mv /etc/apt/sources.list.d/raspi.list /etc/apt/sources.list.d/raspi.list.disabled.$(date +%Y%m%d_%H%M%S)
+    fi
+fi
+
 # Fix GPG keys and package verification issues
 echo "🔑 Fixing GPG keys and package verification..."
 # Fix any broken GPG keys
