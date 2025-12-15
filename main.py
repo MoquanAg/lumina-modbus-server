@@ -511,8 +511,15 @@ class LuminaModbusServer:
             if conn.client.connected:
                 return conn.client
             else:
-                # Client disconnected, remove it
+                # Client disconnected - MUST close before reconnecting to release serial port lock
+                self.logger.info(f"PyModbus client for {port} disconnected, closing before reconnect...")
+                try:
+                    conn.client.close()
+                except Exception as e:
+                    self.logger.debug(f"Error closing disconnected client: {e}")
                 del self.pymodbus_connections[port][baudrate]
+                # Wait for serial port to be fully released by the OS
+                await asyncio.sleep(0.1)
         
         # Create new PyModbus client
         self.logger.info(f"Creating PyModbus client for {port} @ {baudrate} baud")
@@ -523,7 +530,9 @@ class LuminaModbusServer:
             bytesize=8,
             parity='N',
             stopbits=1,
-            timeout=1.0
+            timeout=1.0,
+            retries=1,  # Reduced from 3 - faster failure, quicker move to next command
+            reconnect_delay=0.5,  # Auto-reconnect delay if connection drops
         )
         
         # Connect
@@ -694,13 +703,22 @@ class LuminaModbusServer:
         for port in AVAILABLE_PORTS:
             for baudrate, conn in list(self.pymodbus_connections.get(port, {}).items()):
                 try:
+                    # Try async close if event loop is running
                     if conn.event_loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             self._close_pymodbus_client(conn.client),
                             conn.event_loop
                         )
+                    else:
+                        # Direct close if event loop not running
+                        conn.client.close()
                 except Exception as e:
                     self.logger.error(f"Error closing connection during shutdown: {e}")
+                    # Last resort - try direct close
+                    try:
+                        conn.client.close()
+                    except:
+                        pass
         
         # Close server socket
         if hasattr(self, 'server_socket'):
