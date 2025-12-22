@@ -448,4 +448,4 @@ lumina-modbus-server/
 - Client integration: See `examples/client/README.md`
 - Protocol details: See [TCP Protocol](#tcp-protocol) section above
 
-updated by steve
+updated by steve v2
