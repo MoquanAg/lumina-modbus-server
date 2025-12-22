@@ -21,3 +21,4 @@ eggs/
 .ipynb_checkpoints
 
 *.log
+.coverage
