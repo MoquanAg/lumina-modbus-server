@@ -2,6 +2,8 @@
 Basic tests for LuminaLogger module.
 """
 
+from doctest import DocFileTest
+from gc import set_debug
 import os
 import tempfile
 import shutil
