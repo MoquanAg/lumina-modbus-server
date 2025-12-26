@@ -9,7 +9,7 @@ def make_server():
     server = main.LuminaModbusServer(host="127.0.0.1", port=9999, request_timeout=1.0)
     server.logger = MagicMock()
 
-    # 确保每个 port 都有 logger（avoid environment KeyError）
+    # make each port have logger（avoid environment KeyError）
     for p in main.AVAILABLE_PORTS:
         server.port_loggers[p] = MagicMock()
 
