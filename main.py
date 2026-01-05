@@ -66,7 +66,7 @@ def calculate_min_command_spacing(baudrate: int) -> float:
     if baudrate <= 4800:
         return 0.25  # 250ms for very slow rates
     elif baudrate <= 9600:
-        return 0.10  # 100ms for 9600 baud
+        return 0.15  # 150ms for 9600 baud (safe for long cables up to 15m)
     elif baudrate <= 19200:
         return 0.10  # 100ms for 19200 baud
     elif baudrate <= 38400:
