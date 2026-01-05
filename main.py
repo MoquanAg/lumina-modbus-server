@@ -113,7 +113,8 @@ class LuminaModbusServer:
         
         # Client tracking
         self.client_pending_commands = {}
-        
+        self.client_port_initialized = {}  # {client_id: set of (port, baudrate) tuples}
+
         # Shutdown event
         self.shutdown_event = threading.Event()
         
@@ -324,7 +325,16 @@ class LuminaModbusServer:
             
             # Get or create PyModbus client
             client = await self.get_pymodbus_client(port, baudrate, loop)
-            
+
+            # Flush buffer if this is a new client's first command to this port
+            client_id = command_info['client_id']
+            port_key = (port, baudrate)
+            if client_id not in self.client_port_initialized:
+                self.client_port_initialized[client_id] = set()
+            if port_key not in self.client_port_initialized[client_id]:
+                self._flush_connected_serial_buffer(port, baudrate)
+                self.client_port_initialized[client_id].add(port_key)
+
             # Enforce command spacing
             conn = self.pymodbus_connections[port][baudrate]
             time_since_last = time.time() - conn.last_used
@@ -530,6 +540,8 @@ class LuminaModbusServer:
             
         except Exception as e:
             port_logger.error(f"PyModbus command failed: {str(e)}")
+            # Flush buffer after error to resync framing for next command
+            self._flush_connected_serial_buffer(port, baudrate)
             raise
 
     async def get_pymodbus_client(self, port: str, baudrate: int, loop: asyncio.AbstractEventLoop) -> AsyncModbusSerialClient:
@@ -601,6 +613,29 @@ class LuminaModbusServer:
             client.close()
         except Exception as e:
             self.logger.error(f"Error closing PyModbus client: {e}")
+
+    def _flush_connected_serial_buffer(self, port: str, baudrate: int) -> bool:
+        """
+        Flush serial input buffer on an active PyModbus connection.
+        Uses PyModbus internals to access the underlying serial object.
+        Returns True if flush succeeded.
+        """
+        try:
+            if baudrate not in self.pymodbus_connections.get(port, {}):
+                return False
+            conn = self.pymodbus_connections[port][baudrate]
+            if not conn.client.connected:
+                return False
+            # Access underlying serial through PyModbus transport
+            if hasattr(conn.client, 'transport') and conn.client.transport:
+                serial_obj = getattr(conn.client.transport, 'serial', None)
+                if serial_obj and hasattr(serial_obj, 'reset_input_buffer'):
+                    serial_obj.reset_input_buffer()
+                    self.port_loggers[port].info(f"Flushed input buffer (active connection)")
+                    return True
+        except Exception as e:
+            self.port_loggers[port].warning(f"Could not flush active connection buffer: {e}")
+        return False
 
     def _modbus_response_to_bytes(self, slave_addr: int, function_code: int, registers: list) -> bytes:
         """
@@ -717,12 +752,15 @@ class LuminaModbusServer:
     def cleanup_client(self, client_id: int, client_socket):
         """Clean up resources for a disconnected client (same as original)"""
         self.logger.info(f"Cleaning up client {client_id}")
-        
+
         if client_id in self.client_pending_commands:
             pending = self.client_pending_commands[client_id]
             if pending:
                 self.logger.info(f"Cleaning up {len(pending)} pending commands for client {client_id}")
             self.client_pending_commands.pop(client_id, None)
+
+        # Clean up port initialization tracking
+        self.client_port_initialized.pop(client_id, None)
         
         if client_id in self.clients:
             self.clients.remove(client_id)
