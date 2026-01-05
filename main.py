@@ -45,7 +45,36 @@ class PyModbusConnection:
     last_used: float
     event_loop: asyncio.AbstractEventLoop
     in_use: bool = False
-    min_command_spacing: float = 0.05
+    min_command_spacing: float = 0.05  # Will be set dynamically based on baudrate
+
+
+def calculate_min_command_spacing(baudrate: int) -> float:
+    """
+    Calculate minimum command spacing based on baud rate.
+
+    Lower baud rates need more time between commands due to:
+    - Longer transmission times (1 byte ≈ 10 bits at ~1ms per bit at 9600 baud)
+    - Device turnaround time (time for slave to process and respond)
+    - Cable propagation delays (more significant with longer cables)
+
+    Args:
+        baudrate: Serial baud rate (e.g., 9600, 19200, 115200)
+
+    Returns:
+        Minimum spacing in seconds between commands on the same port
+    """
+    if baudrate <= 4800:
+        return 0.25  # 250ms for very slow rates
+    elif baudrate <= 9600:
+        return 0.15  # 150ms for 9600 baud (common for sensors with long cables)
+    elif baudrate <= 19200:
+        return 0.10  # 100ms for 19200 baud
+    elif baudrate <= 38400:
+        return 0.08  # 80ms for 38400 baud
+    elif baudrate <= 57600:
+        return 0.06  # 60ms for 57600 baud
+    else:
+        return 0.05  # 50ms for high-speed (115200+)
 
 class LuminaModbusServer:
     def __init__(self, host='127.0.0.1', port=8888, max_queue_size=100, request_timeout=30):
@@ -541,14 +570,16 @@ class LuminaModbusServer:
         if not client.connected:
             raise Exception(f"Failed to connect PyModbus client to {port}")
         
-        # Store connection
+        # Store connection with dynamic command spacing based on baud rate
         conn = PyModbusConnection(
             client=client,
             port=port,
             baudrate=baudrate,
             last_used=time.time(),
-            event_loop=loop
+            event_loop=loop,
+            min_command_spacing=calculate_min_command_spacing(baudrate)
         )
+        self.logger.info(f"Command spacing for {port} @ {baudrate} baud: {conn.min_command_spacing*1000:.0f}ms")
         
         self.pymodbus_connections[port][baudrate] = conn
         self.logger.info(f"PyModbus client connected: {port} @ {baudrate} baud")

@@ -774,6 +774,178 @@ class LuminaModbusClient:
         
         return ModbusReadResponse(registers=[], error="No response or failed")
 
+    def read_input_registers(self, port: str, address: int, count: int, slave_addr: int,
+                             baudrate: int = 9600, timeout: float = 1.0, device_name: str = None):
+        """
+        Read input registers (Modbus function code 0x04).
+
+        Args:
+            port: Serial port (e.g., '/dev/ttyAMA3')
+            address: Starting register address
+            count: Number of registers to read
+            slave_addr: Modbus slave address
+            baudrate: Serial baudrate
+            timeout: Response timeout in seconds
+            device_name: Optional device name for command ID (e.g., 'sensor')
+
+        Returns:
+            ModbusReadResponse: Response object with registers[] and isError() method
+        """
+        # Build Modbus frame: [slave_addr][func_code][address_hi][address_lo][count_hi][count_lo]
+        command = struct.pack('>BBHH', slave_addr, 0x04, address, count)
+
+        # Generate device_type for command ID
+        device_type = f"read_{device_name}" if device_name else "MODBUS_READ_INPUT"
+
+        command_id = self.send_command(
+            device_type=device_type,
+            port=port,
+            command=command,
+            baudrate=baudrate,
+            response_length=5 + (count * 2) + 2,  # slave+func+byte_count+data+crc
+            timeout=timeout
+        )
+
+        # Wait for response synchronously
+        start_time = time.time()
+
+        while command_id in self.pending_commands:
+            if time.time() - start_time > timeout:
+                logger.warning(f"read_input_registers timeout for command {command_id}")
+                # Cleanup
+                if command_id in self.command_responses:
+                    del self.command_responses[command_id]
+                return ModbusReadResponse(registers=[], error="Timeout")
+            time.sleep(0.01)
+
+        # Get stored response
+        response_data = self.command_responses.get(command_id)
+
+        # Cleanup stored response
+        if command_id in self.command_responses:
+            del self.command_responses[command_id]
+
+        # Parse response
+        if response_data and response_data.data and response_data.status == 'success':
+            try:
+                # Response format: [slave][func][byte_count][data...][crc]
+                data = response_data.data
+                if len(data) < 3:
+                    return ModbusReadResponse(registers=[], error="Invalid response length")
+
+                byte_count = data[2]
+                registers = []
+
+                # Extract 16-bit registers (big-endian)
+                for i in range(count):
+                    offset = 3 + (i * 2)
+                    if offset + 1 < len(data):
+                        reg_value = (data[offset] << 8) | data[offset + 1]
+                        registers.append(reg_value)
+
+                return ModbusReadResponse(registers=registers)
+
+            except Exception as e:
+                logger.error(f"Error parsing input register response: {e}")
+                return ModbusReadResponse(registers=[], error=str(e))
+
+        return ModbusReadResponse(registers=[], error="No response or failed")
+
+    def write_coil(self, port: str, address: int, value: bool, slave_addr: int,
+                   baudrate: int = 9600, timeout: float = 1.0, device_name: str = None):
+        """
+        Write a single coil (Modbus function code 0x05).
+
+        Args:
+            port: Serial port (e.g., '/dev/ttyAMA3')
+            address: Coil address
+            value: True for ON, False for OFF
+            slave_addr: Modbus slave address
+            baudrate: Serial baudrate
+            timeout: Response timeout in seconds
+            device_name: Optional device name for command ID
+
+        Returns:
+            ModbusWriteResponse: Response object with isError() method
+        """
+        # Modbus uses 0xFF00 for ON, 0x0000 for OFF
+        coil_value = 0xFF00 if value else 0x0000
+
+        # Build Modbus frame: [slave_addr][func_code][address_hi][address_lo][value_hi][value_lo]
+        command = struct.pack('>BBHH', slave_addr, 0x05, address, coil_value)
+
+        device_type = f"write_{device_name}" if device_name else "MODBUS_WRITE_COIL"
+
+        command_id = self.send_command(
+            device_type=device_type,
+            port=port,
+            command=command,
+            baudrate=baudrate,
+            response_length=8,  # Response: slave+func+addr(2)+value(2)+crc(2)
+            timeout=timeout
+        )
+
+        # Wait for response synchronously
+        start_time = time.time()
+        while command_id in self.pending_commands:
+            if time.time() - start_time > timeout:
+                logger.warning(f"write_coil timeout for command {command_id}")
+                return ModbusWriteResponse(success=False, error="Timeout")
+            time.sleep(0.01)
+
+        return ModbusWriteResponse(success=True)
+
+    def write_coils(self, port: str, address: int, values: List[bool], slave_addr: int,
+                    baudrate: int = 9600, timeout: float = 1.0, device_name: str = None):
+        """
+        Write multiple coils (Modbus function code 0x0F).
+
+        Args:
+            port: Serial port
+            address: Starting coil address
+            values: List of boolean values (True=ON, False=OFF)
+            slave_addr: Modbus slave address
+            baudrate: Serial baudrate
+            timeout: Response timeout in seconds
+            device_name: Optional device name for command ID
+
+        Returns:
+            ModbusWriteResponse: Response object with isError() method
+        """
+        count = len(values)
+        byte_count = (count + 7) // 8  # Number of bytes needed
+
+        # Build Modbus frame: [slave][func][addr_hi][addr_lo][count_hi][count_lo][byte_count][data...]
+        command = struct.pack('>BBHHB', slave_addr, 0x0F, address, count, byte_count)
+
+        # Pack coil values into bytes (LSB first within each byte)
+        coil_bytes = bytearray(byte_count)
+        for i, value in enumerate(values):
+            if value:
+                coil_bytes[i // 8] |= (1 << (i % 8))
+        command += bytes(coil_bytes)
+
+        device_type = f"write_{device_name}" if device_name else "MODBUS_WRITE_COILS"
+
+        command_id = self.send_command(
+            device_type=device_type,
+            port=port,
+            command=command,
+            baudrate=baudrate,
+            response_length=8,  # Response: slave+func+addr(2)+count(2)+crc(2)
+            timeout=timeout
+        )
+
+        # Wait for response synchronously
+        start_time = time.time()
+        while command_id in self.pending_commands:
+            if time.time() - start_time > timeout:
+                logger.warning(f"write_coils timeout for command {command_id}")
+                return ModbusWriteResponse(success=False, error="Timeout")
+            time.sleep(0.01)
+
+        return ModbusWriteResponse(success=True)
+
 
 class ModbusWriteResponse:
     """PyModbus-compatible write response object."""
