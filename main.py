@@ -552,7 +552,16 @@ class LuminaModbusServer:
         
         # Create new PyModbus client
         self.logger.info(f"Creating PyModbus client for {port} @ {baudrate} baud")
-        
+
+        # Flush serial buffer BEFORE PyModbus connects (uses public pyserial API)
+        try:
+            import serial
+            with serial.Serial(port, baudrate, timeout=0.1) as ser:
+                ser.reset_input_buffer()
+                self.logger.info(f"Flushed input buffer for {port}")
+        except Exception as e:
+            self.logger.warning(f"Could not pre-flush serial buffer for {port}: {e}")
+
         client = AsyncModbusSerialClient(
             port=port,
             baudrate=baudrate,
@@ -566,10 +575,10 @@ class LuminaModbusServer:
         
         # Connect
         await client.connect()
-        
+
         if not client.connected:
             raise Exception(f"Failed to connect PyModbus client to {port}")
-        
+
         # Store connection with dynamic command spacing based on baud rate
         conn = PyModbusConnection(
             client=client,
