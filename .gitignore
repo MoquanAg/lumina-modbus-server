@@ -22,3 +22,6 @@ eggs/
 
 *.log
 .coverage
+
+# Claude Code
+.claude/
