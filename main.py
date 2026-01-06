@@ -338,6 +338,8 @@ class LuminaModbusServer:
 
         # Check if we got enough data
         if len(response) < 4:
+            # Drain any remaining bytes that might arrive late
+            self._drain_serial_buffer(conn, port_logger)
             raise Exception(f"Response too short: {len(response)} bytes (expected {response_length})")
 
         # Validate CRC
@@ -348,10 +350,38 @@ class LuminaModbusServer:
             port_logger.error(
                 f"CRC mismatch: received {received_crc.hex()}, expected {expected_crc.hex()}"
             )
+            # Drain any remaining stale bytes to prevent contaminating next read
+            self._drain_serial_buffer(conn, port_logger)
             raise Exception(f"CRC mismatch in response")
 
         port_logger.info(f"Response: {len(response)} bytes, CRC valid")
         return response
+
+    def _drain_serial_buffer(self, conn: SerialConnection, port_logger):
+        """
+        Drain any remaining bytes from serial buffer after an error.
+        This prevents late bytes from contaminating the next read.
+        """
+        try:
+            # Temporarily set short timeout for draining
+            old_timeout = conn.serial_port.timeout
+            conn.serial_port.timeout = 0.1  # 100ms
+
+            # Read until empty
+            drained = b''
+            while True:
+                chunk = conn.serial_port.read(256)
+                if not chunk:
+                    break
+                drained += chunk
+
+            # Restore timeout
+            conn.serial_port.timeout = old_timeout
+
+            if drained:
+                port_logger.info(f"Drained {len(drained)} stale bytes: {drained.hex()}")
+        except Exception as e:
+            port_logger.warning(f"Error draining buffer: {e}")
 
     def get_serial_connection(self, port: str, baudrate: int, timeout: float) -> SerialConnection:
         """Get or create serial connection for port/baudrate."""
