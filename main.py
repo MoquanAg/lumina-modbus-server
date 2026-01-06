@@ -613,7 +613,7 @@ class LuminaModbusServer:
             parity='N',
             stopbits=1,
             timeout=1.0,
-            retries=1,  # Reduced from 3 - faster failure, quicker move to next command
+            retries=0,  # No retries - prevents frame misalignment from late responses
             reconnect_delay=0.5,  # Auto-reconnect delay if connection drops
         )
         
