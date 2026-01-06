@@ -1,20 +1,19 @@
 """
-LuminaModbusServer: Upgraded with PyModbus for robust Modbus RTU communication.
+LuminaModbusServer: Raw pyserial implementation for reliable Modbus RTU communication.
 
-This version replaces custom serial code with PyModbus while maintaining
-the existing TCP server architecture and text protocol for full compatibility
-with existing clients.
+This version uses raw pyserial for direct serial I/O with true timeout control,
+replacing PyModbus which had issues with hanging on unresponsive sensors.
 
-Key improvements:
-- PyModbus handles timing, CRC, and retries
-- More robust error handling
-- Better Modbus compliance
-- Same protocol - no client changes needed!
+Key features:
+- Direct pyserial control with native timeouts
+- No asyncio complexity - simple synchronous I/O
+- Manual CRC validation
+- Same TCP protocol - no client changes needed!
 """
 
 import concurrent.futures
 from queue import Queue
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 import time
 from dataclasses import dataclass
 from LuminaLogger import LuminaLogger
@@ -23,28 +22,18 @@ import os
 import threading
 import socket
 import queue
-import asyncio
 import struct
-
-# PyModbus imports
-try:
-    from pymodbus.client import AsyncModbusSerialClient
-    PYMODBUS_AVAILABLE = True
-except ImportError:
-    PYMODBUS_AVAILABLE = False
-    print("WARNING: PyModbus not installed. Install with: pip install pymodbus>=3.6.0")
+import serial
 
 AVAILABLE_PORTS = ['/dev/ttyAMA0', '/dev/ttyAMA1', '/dev/ttyAMA2', '/dev/ttyAMA3', '/dev/ttyAMA4']
 
 @dataclass
-class PyModbusConnection:
-    """PyModbus client connection wrapper"""
-    client: 'AsyncModbusSerialClient'
+class SerialConnection:
+    """Serial port connection wrapper for direct pyserial I/O"""
+    serial_port: serial.Serial
     port: str
     baudrate: int
     last_used: float
-    event_loop: asyncio.AbstractEventLoop
-    in_use: bool = False
     min_command_spacing: float = 0.05  # Will be set dynamically based on baudrate
 
 
@@ -78,53 +67,50 @@ def calculate_min_command_spacing(baudrate: int) -> float:
 
 class LuminaModbusServer:
     def __init__(self, host='127.0.0.1', port=8888, max_queue_size=100, request_timeout=30):
-        if not PYMODBUS_AVAILABLE:
-            raise RuntimeError("PyModbus is required but not installed. Run: pip install pymodbus>=3.6.0")
-        
         # Server configuration
         self.host = host
         self.port = port
         self.request_timeout = request_timeout
-        
+
         # Connection management
         self.clients = set()
         self.command_queues = {
-            port: Queue(maxsize=max_queue_size) 
+            port: Queue(maxsize=max_queue_size)
             for port in AVAILABLE_PORTS
         }
-        
-        # PyModbus connection pool (one client per port/baudrate combination)
-        self.pymodbus_connections: Dict[str, Dict[int, PyModbusConnection]] = {
+
+        # Serial connection pool (one connection per port/baudrate combination)
+        self.serial_connections: Dict[str, Dict[int, SerialConnection]] = {
             port: {} for port in AVAILABLE_PORTS
         }
-        
+
         # Thread pool for serial operations
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=len(AVAILABLE_PORTS),
             thread_name_prefix="serial_worker"
         )
-        
+
         # Logging setup
         self.logger = LuminaLogger('LuminaModbusServer')
         self.port_loggers = {
             port: LuminaLogger(f'{port.split("/")[-1]}')
             for port in AVAILABLE_PORTS
         }
-        
+
         # Client tracking
         self.client_pending_commands = {}
         self.client_port_initialized = {}  # {client_id: set of (port, baudrate) tuples}
 
         # Shutdown event
         self.shutdown_event = threading.Event()
-        
-        self.logger.info("PyModbus-enabled Lumina Modbus Server initialized")
+
+        self.logger.info("Raw pyserial Lumina Modbus Server initialized")
 
     def start(self):
         """Start the Modbus server and initialize all components."""
         try:
             # Start serial processors in thread pool
-            self.logger.info("Starting serial processors with PyModbus...")
+            self.logger.info("Starting serial processors with raw pyserial...")
             
             self.processor_threads = []
             
@@ -145,7 +131,7 @@ class LuminaModbusServer:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(5)
             
-            self.logger.info(f"Server started on {self.host}:{self.port} (PyModbus mode)")
+            self.logger.info(f"Server started on {self.host}:{self.port} (raw pyserial mode)")
             
             while not self.shutdown_event.is_set():
                 try:
@@ -169,7 +155,7 @@ class LuminaModbusServer:
         client_id = id(client_socket)
         self.logger.info(f"New client connected: {client_id} from {address}")
         
-        # PyModbus connections are shared across all clients - no need to close them
+        # Serial connections are shared across all clients - no need to close them
         self.clients.add(client_id)
         self.client_pending_commands[client_id] = set()
         
@@ -256,14 +242,10 @@ class LuminaModbusServer:
             self.logger.error(f"Error processing client message: {str(e)}")
 
     def process_serial_port(self, port: str):
-        """Process commands for a specific serial port using PyModbus"""
+        """Process commands for a specific serial port using raw pyserial."""
         port_logger = self.port_loggers[port]
-        port_logger.info(f"PyModbus serial processor started for {port}")
-        
-        # Create dedicated event loop for this port's PyModbus operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
+        port_logger.info(f"Serial processor started for {port}")
+
         while not self.shutdown_event.is_set():
             try:
                 command_info = None
@@ -271,7 +253,7 @@ class LuminaModbusServer:
                     command_info = self.command_queues[port].get(timeout=1.0)
                 except queue.Empty:
                     continue
-                
+
                 # Check if client is still connected
                 client_id = command_info['client_id']
                 if client_id not in self.clients:
@@ -289,18 +271,14 @@ class LuminaModbusServer:
                     self.command_queues[port].task_done()
                     continue
 
-                # Process command using PyModbus
+                # Process command using raw pyserial
                 try:
-                    response = loop.run_until_complete(
-                        self.execute_pymodbus_command(port, command_info, loop)
-                    )
-                    
+                    response = self.execute_serial_command(port, command_info)
+
                     if client_id in self.clients:
                         self.send_response_sync(command_info, response)
                 except Exception as e:
-                    port_logger.error(f"Error processing PyModbus command: {str(e)}")
-                    # Flush buffer after errors to clear late responses
-                    self._flush_connected_serial_buffer(port, command_info['baudrate'])
+                    port_logger.error(f"Serial command failed: {str(e)}")
                     if client_id in self.clients:
                         self.send_error_sync(command_info, str(e))
                 finally:
@@ -309,410 +287,122 @@ class LuminaModbusServer:
                             self.command_queues[port].task_done()
                         except ValueError:
                             port_logger.debug("Task already marked as done")
-                    
-            except Exception as e:
-                port_logger.error(f"Critical error in PyModbus processor: {str(e)}")
-                time.sleep(0.1)
-        
-        # Clean up event loop
-        loop.close()
 
-    async def execute_pymodbus_command(self, port: str, command_info: dict, loop: asyncio.AbstractEventLoop) -> bytes:
+            except Exception as e:
+                port_logger.error(f"Critical error in serial processor: {str(e)}")
+                time.sleep(0.1)
+
+    def execute_serial_command(self, port: str, command_info: dict) -> bytes:
         """
-        Execute Modbus command using PyModbus.
-        
-        Parses raw Modbus frame and uses PyModbus for robust communication.
+        Execute Modbus command using raw pyserial with reliable timeout.
+
+        The command already includes CRC from the client. We just:
+        1. Flush input buffer
+        2. Write command
+        3. Read response with timeout
+        4. Validate CRC
+        5. Return raw response
         """
         port_logger = self.port_loggers[port]
         baudrate = command_info['baudrate']
         command = command_info['command']
-        
-        try:
-            # Parse Modbus frame
-            # Format: [slave_addr, function_code, data..., crc_low, crc_high]
-            if len(command) < 4:
-                raise ValueError(f"Modbus frame too short: {len(command)} bytes")
-            
+        timeout = command_info['timeout']
+        response_length = command_info['response_length']
+
+        # Parse for logging
+        if len(command) >= 2:
             slave_addr = command[0]
             function_code = command[1]
-            
-            # Get or create PyModbus client
-            client = await self.get_pymodbus_client(port, baudrate, loop)
+            port_logger.info(f"Command: slave={hex(slave_addr)}, func={hex(function_code)}, len={len(command)}")
 
-            # Flush buffer if this is a new client's first command to this port
-            client_id = command_info['client_id']
-            port_key = (port, baudrate)
-            if client_id not in self.client_port_initialized:
-                self.client_port_initialized[client_id] = set()
-            if port_key not in self.client_port_initialized[client_id]:
-                self._flush_connected_serial_buffer(port, baudrate)
-                self.client_port_initialized[client_id].add(port_key)
+        # Get or create serial connection
+        conn = self.get_serial_connection(port, baudrate, timeout)
 
-            # Enforce command spacing
-            conn = self.pymodbus_connections[port][baudrate]
-            time_since_last = time.time() - conn.last_used
-            if time_since_last < conn.min_command_spacing:
-                await asyncio.sleep(conn.min_command_spacing - time_since_last)
+        # Enforce command spacing
+        time_since_last = time.time() - conn.last_used
+        if time_since_last < conn.min_command_spacing:
+            time.sleep(conn.min_command_spacing - time_since_last)
 
-            # Execute based on function code
-            if function_code == 0x01:  # Read Coils
-                coil_address = struct.unpack('>H', command[2:4])[0]
-                coil_count = struct.unpack('>H', command[4:6])[0]
-                
-                port_logger.info(
-                    f"Read Coils: slave={hex(slave_addr)}, "
-                    f"addr={hex(coil_address)}, count={coil_count}"
-                )
-                
-                response = await asyncio.wait_for(
-                    client.read_coils(
-                        address=coil_address,
-                        count=coil_count,
-                        device_id=slave_addr
-                    ),
-                    timeout=command_info['timeout']
-                )
-                
-                if response.isError():
-                    raise Exception(f"Modbus error: {response}")
-                
-                # Convert bits to bytes
-                response_bytes = self._coils_response_to_bytes(
-                    slave_addr, function_code, response.bits
-                )
-                
-            elif function_code == 0x02:  # Read Discrete Inputs
-                input_address = struct.unpack('>H', command[2:4])[0]
-                input_count = struct.unpack('>H', command[4:6])[0]
-                
-                port_logger.info(
-                    f"Read Discrete Inputs: slave={hex(slave_addr)}, "
-                    f"addr={hex(input_address)}, count={input_count}"
-                )
-                
-                response = await asyncio.wait_for(
-                    client.read_discrete_inputs(
-                        address=input_address,
-                        count=input_count,
-                        device_id=slave_addr
-                    ),
-                    timeout=command_info['timeout']
-                )
-                
-                if response.isError():
-                    raise Exception(f"Modbus error: {response}")
-                
-                # Convert bits to bytes
-                response_bytes = self._coils_response_to_bytes(
-                    slave_addr, function_code, response.bits
-                )
-                
-            elif function_code == 0x03:  # Read Holding Registers
-                register_address = struct.unpack('>H', command[2:4])[0]
-                register_count = struct.unpack('>H', command[4:6])[0]
-                
-                port_logger.info(
-                    f"Read Holding: slave={hex(slave_addr)}, "
-                    f"addr={hex(register_address)}, count={register_count}"
-                )
-                
-                response = await asyncio.wait_for(
-                    client.read_holding_registers(
-                        address=register_address,
-                        count=register_count,
-                        device_id=slave_addr
-                    ),
-                    timeout=command_info['timeout']
-                )
-                
-                if response.isError():
-                    raise Exception(f"Modbus error: {response}")
-                
-                # Convert PyModbus response back to raw bytes for protocol compatibility
-                response_bytes = self._modbus_response_to_bytes(
-                    slave_addr, function_code, response.registers
-                )
-                
-            elif function_code == 0x06:  # Write Single Register
-                register_address = struct.unpack('>H', command[2:4])[0]
-                register_value = struct.unpack('>H', command[4:6])[0]
-                
-                port_logger.info(
-                    f"Write Register: slave={hex(slave_addr)}, "
-                    f"addr={hex(register_address)}, value={register_value}"
-                )
-                
-                response = await asyncio.wait_for(
-                    client.write_register(
-                        address=register_address,
-                        value=register_value,
-                        device_id=slave_addr
-                    ),
-                    timeout=command_info['timeout']
-                )
-                
-                if response.isError():
-                    raise Exception(f"Modbus error: {response}")
-                
-                # Echo back the write command as per Modbus spec
-                response_bytes = command  # Write response echoes the request
-                
-            elif function_code == 0x05:  # Write Single Coil
-                coil_address = struct.unpack('>H', command[2:4])[0]
-                coil_value_raw = struct.unpack('>H', command[4:6])[0]
-                coil_value = bool(coil_value_raw == 0xFF00)  # 0xFF00 = ON, 0x0000 = OFF
-                
-                port_logger.info(
-                    f"Write Coil: slave={hex(slave_addr)}, "
-                    f"addr={hex(coil_address)}, value={coil_value}"
-                )
-                
-                response = await asyncio.wait_for(
-                    client.write_coil(
-                        address=coil_address,
-                        value=coil_value,
-                        device_id=slave_addr
-                    ),
-                    timeout=command_info['timeout']
-                )
-                
-                if response.isError():
-                    raise Exception(f"Modbus error: {response}")
-                
-                # Echo back the write command as per Modbus spec
-                response_bytes = command
-                
-            elif function_code == 0x0F:  # Write Multiple Coils
-                coil_address = struct.unpack('>H', command[2:4])[0]
-                coil_count = struct.unpack('>H', command[4:6])[0]
-                byte_count = command[6]
-                
-                # Extract coil values from bytes
-                coil_values = []
-                for byte_idx in range(byte_count):
-                    byte_val = command[7 + byte_idx]
-                    for bit_idx in range(8):
-                        if len(coil_values) < coil_count:
-                            coil_values.append(bool((byte_val >> bit_idx) & 1))
-                
-                port_logger.info(
-                    f"Write Multiple Coils: slave={hex(slave_addr)}, "
-                    f"addr={hex(coil_address)}, count={coil_count}"
-                )
-                
-                response = await asyncio.wait_for(
-                    client.write_coils(
-                        address=coil_address,
-                        values=coil_values,
-                        device_id=slave_addr
-                    ),
-                    timeout=command_info['timeout']
-                )
-                
-                if response.isError():
-                    raise Exception(f"Modbus error: {response}")
-                
-                # Response format: slave + function + addr(2) + count(2) + crc(2)
-                response_bytes = struct.pack(
-                    '>BBHH',
-                    slave_addr,
-                    function_code,
-                    coil_address,
-                    coil_count
-                )
-                response_bytes += self._calculate_crc(response_bytes)
-                
-            elif function_code == 0x10:  # Write Multiple Registers
-                register_address = struct.unpack('>H', command[2:4])[0]
-                register_count = struct.unpack('>H', command[4:6])[0]
-                byte_count = command[6]
-                
-                # Extract values
-                values = []
-                for i in range(register_count):
-                    offset = 7 + (i * 2)
-                    value = struct.unpack('>H', command[offset:offset+2])[0]
-                    values.append(value)
-                
-                port_logger.info(
-                    f"Write Multiple: slave={hex(slave_addr)}, "
-                    f"addr={hex(register_address)}, count={register_count}, values={values}"
-                )
-                
-                response = await asyncio.wait_for(
-                    client.write_registers(
-                        address=register_address,
-                        values=values,
-                        device_id=slave_addr
-                    ),
-                    timeout=command_info['timeout']
-                )
-                
-                if response.isError():
-                    raise Exception(f"Modbus error: {response}")
-                
-                # Response format: slave + function + addr(2) + count(2) + crc(2)
-                response_bytes = struct.pack(
-                    '>BBHH',
-                    slave_addr,
-                    function_code,
-                    register_address,
-                    register_count
-                )
-                response_bytes += self._calculate_crc(response_bytes)
-                
+        # Flush any stale data from input buffer
+        conn.serial_port.reset_input_buffer()
+
+        # Write command
+        conn.serial_port.write(command)
+        conn.serial_port.flush()  # Ensure data is sent
+
+        # Read response with timeout (pyserial handles this natively!)
+        response = conn.serial_port.read(response_length)
+
+        # Update last used time
+        conn.last_used = time.time()
+
+        # Check if we got enough data
+        if len(response) < 4:
+            raise Exception(f"Response too short: {len(response)} bytes (expected {response_length})")
+
+        # Validate CRC
+        data = response[:-2]
+        received_crc = response[-2:]
+        expected_crc = self._calculate_crc(data)
+        if received_crc != expected_crc:
+            port_logger.error(
+                f"CRC mismatch: received {received_crc.hex()}, expected {expected_crc.hex()}"
+            )
+            raise Exception(f"CRC mismatch in response")
+
+        port_logger.info(f"Response: {len(response)} bytes, CRC valid")
+        return response
+
+    def get_serial_connection(self, port: str, baudrate: int, timeout: float) -> SerialConnection:
+        """Get or create serial connection for port/baudrate."""
+        # Check if we have an existing connection
+        if baudrate in self.serial_connections[port]:
+            conn = self.serial_connections[port][baudrate]
+            # Update timeout if different
+            if conn.serial_port.timeout != timeout:
+                conn.serial_port.timeout = timeout
+            # Check if port is still open
+            if conn.serial_port.is_open:
+                return conn
             else:
-                # Unsupported function - fall back to raw frame send
-                port_logger.warning(f"Unsupported function code {hex(function_code)}, sending raw frame")
-                # For unsupported functions, we can't use PyModbus - would need raw serial
-                raise NotImplementedError(f"Function code {hex(function_code)} not yet supported by PyModbus mode")
-            
-            # Update last used time
-            conn.last_used = time.time()
-            
-            return response_bytes
-            
-        except Exception as e:
-            port_logger.error(f"PyModbus command failed: {str(e)}")
-            # Flush buffer after error to resync framing for next command
-            self._flush_connected_serial_buffer(port, baudrate)
-            raise
-
-    async def get_pymodbus_client(self, port: str, baudrate: int, loop: asyncio.AbstractEventLoop) -> AsyncModbusSerialClient:
-        """Get or create PyModbus client for port/baudrate"""
-        # Check if we have an existing client
-        if baudrate in self.pymodbus_connections[port]:
-            conn = self.pymodbus_connections[port][baudrate]
-            if conn.client.connected:
-                return conn.client
-            else:
-                # Client disconnected - MUST close before reconnecting to release serial port lock
-                self.logger.info(f"PyModbus client for {port} disconnected, closing before reconnect...")
+                # Connection closed - remove it
+                self.logger.info(f"Serial connection for {port} closed, reconnecting...")
                 try:
-                    conn.client.close()
-                except Exception as e:
-                    self.logger.debug(f"Error closing disconnected client: {e}")
-                del self.pymodbus_connections[port][baudrate]
-                # Wait for serial port to be fully released by the OS
-                await asyncio.sleep(0.1)
-        
-        # Create new PyModbus client
-        self.logger.info(f"Creating PyModbus client for {port} @ {baudrate} baud")
+                    conn.serial_port.close()
+                except Exception:
+                    pass
+                del self.serial_connections[port][baudrate]
 
-        # Flush serial buffer BEFORE PyModbus connects (uses public pyserial API)
-        try:
-            import serial
-            with serial.Serial(port, baudrate, timeout=0.1) as ser:
-                ser.reset_input_buffer()
-                self.logger.info(f"Flushed input buffer for {port}")
-        except Exception as e:
-            self.logger.warning(f"Could not pre-flush serial buffer for {port}: {e}")
+        # Create new serial connection
+        self.logger.info(f"Creating serial connection for {port} @ {baudrate} baud")
 
-        client = AsyncModbusSerialClient(
+        ser = serial.Serial(
             port=port,
             baudrate=baudrate,
             bytesize=8,
             parity='N',
             stopbits=1,
-            timeout=1.0,
-            retries=0,  # No retries - prevents frame misalignment from late responses
-            reconnect_delay=0.5,  # Auto-reconnect delay if connection drops
+            timeout=timeout
         )
-        
-        # Connect
-        await client.connect()
 
-        if not client.connected:
-            raise Exception(f"Failed to connect PyModbus client to {port}")
+        # Flush any stale data
+        ser.reset_input_buffer()
+        self.logger.info(f"Flushed input buffer for {port}")
 
         # Store connection with dynamic command spacing based on baud rate
-        conn = PyModbusConnection(
-            client=client,
+        conn = SerialConnection(
+            serial_port=ser,
             port=port,
             baudrate=baudrate,
             last_used=time.time(),
-            event_loop=loop,
             min_command_spacing=calculate_min_command_spacing(baudrate)
         )
         self.logger.info(f"Command spacing for {port} @ {baudrate} baud: {conn.min_command_spacing*1000:.0f}ms")
-        
-        self.pymodbus_connections[port][baudrate] = conn
-        self.logger.info(f"PyModbus client connected: {port} @ {baudrate} baud")
-        
-        return client
 
-    async def _close_pymodbus_client(self, client: AsyncModbusSerialClient):
-        """Close PyModbus client asynchronously"""
-        try:
-            client.close()
-        except Exception as e:
-            self.logger.error(f"Error closing PyModbus client: {e}")
+        self.serial_connections[port][baudrate] = conn
+        self.logger.info(f"Serial connection opened: {port} @ {baudrate} baud")
 
-    def _flush_connected_serial_buffer(self, port: str, baudrate: int) -> bool:
-        """
-        Flush serial input buffer on an active PyModbus connection.
-        Uses PyModbus internals to access the underlying serial object.
-        Returns True if flush succeeded.
-        """
-        try:
-            if baudrate not in self.pymodbus_connections.get(port, {}):
-                return False
-            conn = self.pymodbus_connections[port][baudrate]
-            if not conn.client.connected:
-                return False
-            # Access underlying serial through PyModbus transport
-            if hasattr(conn.client, 'transport') and conn.client.transport:
-                serial_obj = getattr(conn.client.transport, 'serial', None)
-                if serial_obj and hasattr(serial_obj, 'reset_input_buffer'):
-                    serial_obj.reset_input_buffer()
-                    self.port_loggers[port].info(f"Flushed input buffer (active connection)")
-                    return True
-        except Exception as e:
-            self.port_loggers[port].warning(f"Could not flush active connection buffer: {e}")
-        return False
-
-    def _modbus_response_to_bytes(self, slave_addr: int, function_code: int, registers: list) -> bytes:
-        """
-        Convert PyModbus response registers back to raw Modbus RTU bytes.
-        
-        Format: [slave_addr, function_code, byte_count, data..., crc_low, crc_high]
-        """
-        byte_count = len(registers) * 2
-        response = struct.pack('BBB', slave_addr, function_code, byte_count)
-        
-        # Add register data
-        for reg in registers:
-            response += struct.pack('>H', reg)
-        
-        # Add CRC
-        response += self._calculate_crc(response)
-        
-        return response
-
-    def _coils_response_to_bytes(self, slave_addr: int, function_code: int, bits: list) -> bytes:
-        """
-        Convert PyModbus coil response (bits) back to raw Modbus RTU bytes.
-        
-        Format: [slave_addr, function_code, byte_count, coil_data..., crc_low, crc_high]
-        Coils are packed 8 per byte, LSB first.
-        """
-        # Pack bits into bytes (8 bits per byte, LSB first)
-        coil_bytes = []
-        for i in range(0, len(bits), 8):
-            byte_val = 0
-            for bit_idx in range(8):
-                if i + bit_idx < len(bits) and bits[i + bit_idx]:
-                    byte_val |= (1 << bit_idx)
-            coil_bytes.append(byte_val)
-        
-        byte_count = len(coil_bytes)
-        response = struct.pack('BBB', slave_addr, function_code, byte_count)
-        response += bytes(coil_bytes)
-        
-        # Add CRC
-        response += self._calculate_crc(response)
-        
-        return response
+        return conn
 
     def _calculate_crc(self, data: bytes) -> bytes:
         """Calculate Modbus CRC16"""
@@ -808,37 +498,25 @@ class LuminaModbusServer:
 
     def stop(self):
         """Stop the server and cleanup resources"""
-        self.logger.info("Shutting down PyModbus server...")
+        self.logger.info("Shutting down server...")
         self.shutdown_event.set()
-        
-        # Close all PyModbus connections
+
+        # Close all serial connections
         for port in AVAILABLE_PORTS:
-            for baudrate, conn in list(self.pymodbus_connections.get(port, {}).items()):
+            for baudrate, conn in list(self.serial_connections.get(port, {}).items()):
                 try:
-                    # Try async close if event loop is running
-                    if conn.event_loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self._close_pymodbus_client(conn.client),
-                            conn.event_loop
-                        )
-                    else:
-                        # Direct close if event loop not running
-                        conn.client.close()
+                    conn.serial_port.close()
+                    self.logger.info(f"Closed serial connection: {port} @ {baudrate}")
                 except Exception as e:
-                    self.logger.error(f"Error closing connection during shutdown: {e}")
-                    # Last resort - try direct close
-                    try:
-                        conn.client.close()
-                    except:
-                        pass
-        
+                    self.logger.error(f"Error closing serial connection: {e}")
+
         # Close server socket
         if hasattr(self, 'server_socket'):
             try:
                 self.server_socket.close()
             except Exception as e:
                 self.logger.error(f"Error closing server socket: {e}")
-        
+
         self.logger.info("Server stopped")
 
 
