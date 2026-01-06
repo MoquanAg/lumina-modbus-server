@@ -242,7 +242,8 @@ class LuminaModbusServer:
                 'baudrate': baudrate_int,
                 'response_length': response_length_int,
                 'timeout': timeout_float,
-                'socket': client_socket
+                'socket': client_socket,
+                'queued_at': time.time()
             }
             
             self.command_queues[port].put(command_info, timeout=1.0)
@@ -275,6 +276,16 @@ class LuminaModbusServer:
                 client_id = command_info['client_id']
                 if client_id not in self.clients:
                     port_logger.debug(f"Skipping command for disconnected client {client_id}")
+                    self.command_queues[port].task_done()
+                    continue
+
+                # Check if command has exceeded its timeout (client already gave up)
+                command_age = time.time() - command_info['queued_at']
+                if command_age > command_info['timeout']:
+                    port_logger.debug(
+                        f"Skipping stale command {command_info['command_id']} "
+                        f"(age: {command_age:.2f}s > timeout: {command_info['timeout']:.2f}s)"
+                    )
                     self.command_queues[port].task_done()
                     continue
 
