@@ -354,9 +354,6 @@ class LuminaModbusServer:
             if time_since_last < conn.min_command_spacing:
                 await asyncio.sleep(conn.min_command_spacing - time_since_last)
 
-            # Flush any stale data before each command (late responses from previous requests)
-            self._flush_connected_serial_buffer(port, baudrate)
-
             # Execute based on function code
             if function_code == 0x01:  # Read Coils
                 coil_address = struct.unpack('>H', command[2:4])[0]
