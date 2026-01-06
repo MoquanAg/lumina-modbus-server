@@ -362,10 +362,13 @@ class LuminaModbusServer:
                     f"addr={hex(coil_address)}, count={coil_count}"
                 )
                 
-                response = await client.read_coils(
-                    address=coil_address,
-                    count=coil_count,
-                    device_id=slave_addr
+                response = await asyncio.wait_for(
+                    client.read_coils(
+                        address=coil_address,
+                        count=coil_count,
+                        device_id=slave_addr
+                    ),
+                    timeout=command_info['timeout']
                 )
                 
                 if response.isError():
@@ -385,10 +388,13 @@ class LuminaModbusServer:
                     f"addr={hex(input_address)}, count={input_count}"
                 )
                 
-                response = await client.read_discrete_inputs(
-                    address=input_address,
-                    count=input_count,
-                    device_id=slave_addr
+                response = await asyncio.wait_for(
+                    client.read_discrete_inputs(
+                        address=input_address,
+                        count=input_count,
+                        device_id=slave_addr
+                    ),
+                    timeout=command_info['timeout']
                 )
                 
                 if response.isError():
@@ -408,10 +414,13 @@ class LuminaModbusServer:
                     f"addr={hex(register_address)}, count={register_count}"
                 )
                 
-                response = await client.read_holding_registers(
-                    address=register_address,
-                    count=register_count,
-                    device_id=slave_addr
+                response = await asyncio.wait_for(
+                    client.read_holding_registers(
+                        address=register_address,
+                        count=register_count,
+                        device_id=slave_addr
+                    ),
+                    timeout=command_info['timeout']
                 )
                 
                 if response.isError():
@@ -431,10 +440,13 @@ class LuminaModbusServer:
                     f"addr={hex(register_address)}, value={register_value}"
                 )
                 
-                response = await client.write_register(
-                    address=register_address,
-                    value=register_value,
-                    device_id=slave_addr
+                response = await asyncio.wait_for(
+                    client.write_register(
+                        address=register_address,
+                        value=register_value,
+                        device_id=slave_addr
+                    ),
+                    timeout=command_info['timeout']
                 )
                 
                 if response.isError():
@@ -453,10 +465,13 @@ class LuminaModbusServer:
                     f"addr={hex(coil_address)}, value={coil_value}"
                 )
                 
-                response = await client.write_coil(
-                    address=coil_address,
-                    value=coil_value,
-                    device_id=slave_addr
+                response = await asyncio.wait_for(
+                    client.write_coil(
+                        address=coil_address,
+                        value=coil_value,
+                        device_id=slave_addr
+                    ),
+                    timeout=command_info['timeout']
                 )
                 
                 if response.isError():
@@ -483,10 +498,13 @@ class LuminaModbusServer:
                     f"addr={hex(coil_address)}, count={coil_count}"
                 )
                 
-                response = await client.write_coils(
-                    address=coil_address,
-                    values=coil_values,
-                    device_id=slave_addr
+                response = await asyncio.wait_for(
+                    client.write_coils(
+                        address=coil_address,
+                        values=coil_values,
+                        device_id=slave_addr
+                    ),
+                    timeout=command_info['timeout']
                 )
                 
                 if response.isError():
@@ -519,10 +537,13 @@ class LuminaModbusServer:
                     f"addr={hex(register_address)}, count={register_count}, values={values}"
                 )
                 
-                response = await client.write_registers(
-                    address=register_address,
-                    values=values,
-                    device_id=slave_addr
+                response = await asyncio.wait_for(
+                    client.write_registers(
+                        address=register_address,
+                        values=values,
+                        device_id=slave_addr
+                    ),
+                    timeout=command_info['timeout']
                 )
                 
                 if response.isError():
