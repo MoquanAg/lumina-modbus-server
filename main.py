@@ -299,6 +299,8 @@ class LuminaModbusServer:
                         self.send_response_sync(command_info, response)
                 except Exception as e:
                     port_logger.error(f"Error processing PyModbus command: {str(e)}")
+                    # Flush buffer after errors to clear late responses
+                    self._flush_connected_serial_buffer(port, command_info['baudrate'])
                     if client_id in self.clients:
                         self.send_error_sync(command_info, str(e))
                 finally:
@@ -351,7 +353,10 @@ class LuminaModbusServer:
             time_since_last = time.time() - conn.last_used
             if time_since_last < conn.min_command_spacing:
                 await asyncio.sleep(conn.min_command_spacing - time_since_last)
-            
+
+            # Flush any stale data before each command (late responses from previous requests)
+            self._flush_connected_serial_buffer(port, baudrate)
+
             # Execute based on function code
             if function_code == 0x01:  # Read Coils
                 coil_address = struct.unpack('>H', command[2:4])[0]
