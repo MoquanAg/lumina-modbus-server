@@ -347,8 +347,10 @@ class LuminaModbusServer:
         received_crc = response[-2:]
         expected_crc = self._calculate_crc(data)
         if received_crc != expected_crc:
+            response_hex = ' '.join(f'{b:02X}' for b in response)
             port_logger.error(
-                f"CRC mismatch: received {received_crc.hex()}, expected {expected_crc.hex()}"
+                f"CRC mismatch: got {received_crc.hex()}, expected {expected_crc.hex()}, "
+                f"response ({len(response)} bytes): {response_hex}"
             )
             # Drain any remaining stale bytes to prevent contaminating next read
             self._drain_serial_buffer(conn, port_logger)
