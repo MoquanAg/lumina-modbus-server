@@ -330,6 +330,14 @@ class LuminaModbusServer:
         conn.serial_port.write(command)
         conn.serial_port.flush()  # Ensure data is sent
 
+        # Wait for TX to complete and transceiver to switch to RX mode
+        # At 9600 baud, 8 bytes takes ~8.3ms. Add margin for transceiver switching.
+        tx_time = len(command) * 10 / baudrate  # 10 bits per byte (8N1 + start/stop)
+        time.sleep(tx_time + 0.005)  # TX time + 5ms for transceiver turnaround
+
+        # Flush any echo that might have been received during TX
+        conn.serial_port.reset_input_buffer()
+
         # Read response with timeout (pyserial handles this natively!)
         response = conn.serial_port.read(response_length)
 
