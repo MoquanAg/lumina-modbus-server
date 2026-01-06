@@ -359,29 +359,29 @@ class LuminaModbusServer:
 
     def _drain_serial_buffer(self, conn: SerialConnection, port_logger):
         """
-        Drain any remaining bytes from serial buffer after an error.
-        This prevents late bytes from contaminating the next read.
+        Quickly drain any remaining bytes from serial buffer after an error.
+        Uses a short timeout and max drain time to avoid blocking.
         """
         try:
-            # Temporarily set short timeout for draining
+            # Temporarily set very short timeout for draining
             old_timeout = conn.serial_port.timeout
-            conn.serial_port.timeout = 0.1  # 100ms
+            conn.serial_port.timeout = 0.02  # 20ms - just enough to catch late bytes
 
-            # Read until empty
-            drained = b''
-            while True:
-                chunk = conn.serial_port.read(256)
-                if not chunk:
-                    break
-                drained += chunk
+            # Read whatever is in the buffer right now (non-blocking-ish)
+            drained = conn.serial_port.read(1024)  # Read up to 1KB
 
-            # Restore timeout
+            # Restore timeout immediately
             conn.serial_port.timeout = old_timeout
 
             if drained:
-                port_logger.info(f"Drained {len(drained)} stale bytes: {drained.hex()}")
+                port_logger.info(f"Drained {len(drained)} stale bytes")
         except Exception as e:
             port_logger.warning(f"Error draining buffer: {e}")
+            # Restore timeout on error
+            try:
+                conn.serial_port.timeout = old_timeout
+            except:
+                pass
 
     def get_serial_connection(self, port: str, baudrate: int, timeout: float) -> SerialConnection:
         """Get or create serial connection for port/baudrate."""
@@ -415,8 +415,10 @@ class LuminaModbusServer:
             timeout=timeout
         )
 
-        # Flush any stale data
+        # Flush any stale data and let the bus settle
         ser.reset_input_buffer()
+        time.sleep(0.05)  # 50ms settle time
+        ser.reset_input_buffer()  # Flush again in case noise arrived
         self.logger.info(f"Flushed input buffer for {port}")
 
         # Store connection with dynamic command spacing based on baud rate
