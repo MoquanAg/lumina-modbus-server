@@ -231,7 +231,11 @@ class LuminaModbusServer:
                 'socket': client_socket,
                 'queued_at': time.time()
             }
-            
+
+            # Log received command
+            command_hex = ' '.join(f'{b:02X}' for b in command_bytes)
+            self.logger.info(f"Client {client_id} -> {port}: {command_hex}")
+
             self.command_queues[port].put(command_info, timeout=1.0)
             self.client_pending_commands[client_id].add(command_id)
             
@@ -376,7 +380,8 @@ class LuminaModbusServer:
             conn.serial_port.timeout = old_timeout
 
             if drained:
-                port_logger.info(f"Drained {len(drained)} stale bytes")
+                drained_hex = ' '.join(f'{b:02X}' for b in drained)
+                port_logger.info(f"Drained {len(drained)} stale bytes: {drained_hex}")
         except Exception as e:
             port_logger.warning(f"Error draining buffer: {e}")
             # Restore timeout on error
