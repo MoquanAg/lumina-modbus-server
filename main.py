@@ -340,29 +340,48 @@ class LuminaModbusServer:
         tx_time = (len(command) * 10) / baudrate  # 10 bits per byte (start + 8 data + stop)
         time.sleep(tx_time + 0.005)  # TX time + 5ms margin
 
-        # RS-485 half-duplex: discard TX echo before reading response
-        # Many RS-485 transceivers echo transmitted data back on RX
+        # RS-485 half-duplex: handle TX echo OR direct response
+        # Some transceivers echo TX, others don't - we need to detect which
         command_len = len(command)
-        echo = conn.serial_port.read(command_len)
-        if echo:
-            if echo == command:
-                port_logger.debug(f"Discarded TX echo ({len(echo)} bytes)")
+        slave_addr = command[0]
+        func_code = command[1]
+
+        first_bytes = conn.serial_port.read(command_len)
+        response = b''
+
+        if first_bytes:
+            if first_bytes == command:
+                # It's the echo - discard and read response separately
+                port_logger.debug(f"Discarded TX echo ({len(first_bytes)} bytes)")
+            elif len(first_bytes) >= 3 and first_bytes[0] == slave_addr and first_bytes[1] == func_code:
+                # First bytes match slave+func but not full command
+                # This is likely the START of the response (no echo on this hardware)
+                # For func 0x03: 3rd byte is byte_count, not address
+                # Command has address (0x00), response has byte_count (e.g., 0x16 for 22 bytes)
+                if first_bytes[2] != command[2]:
+                    # 3rd byte differs - this is the response, not echo!
+                    port_logger.debug(f"No TX echo - got response start directly")
+                    response = first_bytes  # Use these bytes as start of response
+                else:
+                    # Looks like partial echo or corrupted data
+                    first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
+                    port_logger.warning(f"Ambiguous data ({len(first_bytes)} bytes): {first_hex}")
+                    # Clear buffer and hope for the best
+                    stale = conn.serial_port.read(conn.serial_port.in_waiting)
+                    if stale:
+                        stale_hex = ' '.join(f'{b:02X}' for b in stale)
+                        port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
             else:
-                # Echo doesn't match - might be noise, late response, or partial echo
-                # Just log and clear buffer - don't drain with timeout as we might
-                # accidentally drain the actual response that's about to arrive
-                echo_hex = ' '.join(f'{b:02X}' for b in echo)
-                port_logger.warning(f"Discarded unexpected data ({len(echo)} bytes): {echo_hex}")
-                # Quick non-blocking clear of anything currently in buffer
+                # Garbage or exception response - clear it
+                first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
+                port_logger.warning(f"Discarded unexpected data ({len(first_bytes)} bytes): {first_hex}")
                 stale = conn.serial_port.read(conn.serial_port.in_waiting)
                 if stale:
                     stale_hex = ' '.join(f'{b:02X}' for b in stale)
                     port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
 
-        # Read response with retry loop for partial reads
-        # (Critical: responses may arrive in chunks, especially at low baud rates)
-        response = b''
-        remaining_bytes = response_length
+        # Read remaining response bytes (or full response if no echo)
+        remaining_bytes = response_length - len(response)
         start_time = time.time()
         max_time = timeout
 
