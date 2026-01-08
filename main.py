@@ -348,6 +348,7 @@ class LuminaModbusServer:
 
         first_bytes = conn.serial_port.read(command_len)
         response = b''
+        exception_func = func_code | 0x80  # Modbus exception has high bit set
 
         if first_bytes:
             if first_bytes == command:
@@ -356,10 +357,36 @@ class LuminaModbusServer:
                 # Small delay after echo to let response start arriving
                 time.sleep(0.02)  # 20ms - gives sensor time to start responding
 
-                # Check if response has started arriving (quick non-blocking check)
-                waiting = conn.serial_port.in_waiting
-                if waiting > 0:
-                    port_logger.debug(f"Response already in buffer: {waiting} bytes")
+            elif len(first_bytes) >= 5 and first_bytes[0] == slave_addr and first_bytes[1] == exception_func:
+                # Modbus EXCEPTION response detected!
+                # Format: slave(1) + func|0x80(1) + exception_code(1) + CRC(2) = 5 bytes
+                # We may have read extra bytes (echo start) after the exception
+                exception_response = first_bytes[:5]
+                exception_code = first_bytes[2]
+                exception_crc = first_bytes[3:5]
+
+                # Validate exception CRC
+                expected_crc = self._calculate_crc(exception_response[:3])
+                if exception_crc == expected_crc:
+                    exception_hex = ' '.join(f'{b:02X}' for b in exception_response)
+                    exception_names = {
+                        0x01: "Illegal Function",
+                        0x02: "Illegal Data Address",
+                        0x03: "Illegal Data Value",
+                        0x04: "Slave Device Failure",
+                    }
+                    exception_name = exception_names.get(exception_code, f"Unknown ({exception_code})")
+                    port_logger.error(f"Modbus exception from slave: {exception_name} - {exception_hex}")
+
+                    # Clear any remaining data (echo that came after exception)
+                    conn.serial_port.reset_input_buffer()
+                    raise Exception(f"Modbus exception: {exception_name}")
+                else:
+                    # CRC mismatch - might be corrupted, treat as unexpected data
+                    first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
+                    port_logger.warning(f"Invalid exception CRC ({len(first_bytes)} bytes): {first_hex}")
+                    conn.serial_port.reset_input_buffer()
+
             elif len(first_bytes) >= 3 and first_bytes[0] == slave_addr and first_bytes[1] == func_code:
                 # First bytes match slave+func but not full command
                 # This is likely the START of the response (no echo on this hardware)
@@ -379,7 +406,7 @@ class LuminaModbusServer:
                         stale_hex = ' '.join(f'{b:02X}' for b in stale)
                         port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
             else:
-                # Garbage or exception response - this is likely stale data from previous session
+                # Garbage data - likely stale from previous session or electrical noise
                 first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
                 port_logger.warning(f"Discarded unexpected data ({len(first_bytes)} bytes): {first_hex}")
 
