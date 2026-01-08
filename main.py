@@ -327,24 +327,61 @@ class LuminaModbusServer:
         if time_since_last < conn.min_command_spacing:
             time.sleep(conn.min_command_spacing - time_since_last)
 
-        # Flush any stale data from input buffer
+        # Flush any stale data from both buffers
         conn.serial_port.reset_input_buffer()
+        conn.serial_port.reset_output_buffer()
 
         # Write command
         conn.serial_port.write(command)
         conn.serial_port.flush()  # Ensure data is sent
 
-        # Read response with timeout (pyserial handles this natively!)
-        response = conn.serial_port.read(response_length)
+        # Read response with retry loop for partial reads
+        # (Critical: responses may arrive in chunks, especially at low baud rates)
+        response = b''
+        remaining_bytes = response_length
+        start_time = time.time()
+        max_time = timeout
+
+        while remaining_bytes > 0 and (time.time() - start_time) < max_time:
+            # Calculate remaining time for this read attempt
+            time_elapsed = time.time() - start_time
+            time_remaining = max_time - time_elapsed
+
+            if time_remaining <= 0:
+                break
+
+            # Set timeout to remaining time (but cap at original timeout)
+            conn.serial_port.timeout = min(time_remaining, timeout)
+
+            chunk = conn.serial_port.read(remaining_bytes)
+            if chunk:
+                response += chunk
+                remaining_bytes = response_length - len(response)
+            else:
+                # No data received - log and continue waiting
+                if len(response) > 0:
+                    port_logger.debug(
+                        f"Partial read: {len(response)}/{response_length} bytes, "
+                        f"waiting {time_remaining:.2f}s more"
+                    )
+
+        # Restore original timeout
+        conn.serial_port.timeout = timeout
 
         # Update last used time
         conn.last_used = time.time()
 
         # Check if we got enough data
-        if len(response) < 4:
+        if len(response) < response_length:
+            elapsed = time.time() - start_time
             # Drain any remaining bytes that might arrive late
             self._drain_serial_buffer(conn, port_logger)
-            raise Exception(f"Response too short: {len(response)} bytes (expected {response_length})")
+            # Close port to force fresh reconnect (resets UART state)
+            self._close_serial_connection(port, baudrate, port_logger)
+            raise Exception(
+                f"Incomplete response after {elapsed:.2f}s: "
+                f"{len(response)}/{response_length} bytes"
+            )
 
         # Validate CRC
         data = response[:-2]
@@ -358,6 +395,8 @@ class LuminaModbusServer:
             )
             # Drain any remaining stale bytes to prevent contaminating next read
             self._drain_serial_buffer(conn, port_logger)
+            # Close port to force fresh reconnect (resets UART state)
+            self._close_serial_connection(port, baudrate, port_logger)
             raise Exception(f"CRC mismatch in response")
 
         port_logger.info(f"Response: {len(response)} bytes, CRC valid")
@@ -390,6 +429,21 @@ class LuminaModbusServer:
             except:
                 pass
 
+    def _close_serial_connection(self, port: str, baudrate: int, port_logger):
+        """
+        Close serial connection and remove from pool after errors.
+        Forces a fresh reconnect on next command, which resets UART state.
+        """
+        try:
+            if baudrate in self.serial_connections.get(port, {}):
+                conn = self.serial_connections[port][baudrate]
+                if conn.serial_port.is_open:
+                    conn.serial_port.close()
+                    port_logger.info(f"Closed serial port {port} @ {baudrate} for recovery")
+                del self.serial_connections[port][baudrate]
+        except Exception as e:
+            port_logger.warning(f"Error closing serial connection: {e}")
+
     def get_serial_connection(self, port: str, baudrate: int, timeout: float) -> SerialConnection:
         """Get or create serial connection for port/baudrate."""
         # Check if we have an existing connection
@@ -419,7 +473,11 @@ class LuminaModbusServer:
             bytesize=8,
             parity='N',
             stopbits=1,
-            timeout=timeout
+            timeout=timeout,
+            # Hardware flow control - was in original implementation
+            # If this causes hangs, set both to False (CTS pin may be floating)
+            rtscts=True,
+            dsrdtr=True
         )
 
         # Flush any stale data and let the bus settle
