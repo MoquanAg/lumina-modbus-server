@@ -376,6 +376,8 @@ class LuminaModbusServer:
             elapsed = time.time() - start_time
             # Drain any remaining bytes that might arrive late
             self._drain_serial_buffer(conn, port_logger)
+            # Close port to force fresh reconnect (resets UART state)
+            self._close_serial_connection(port, baudrate, port_logger)
             raise Exception(
                 f"Incomplete response after {elapsed:.2f}s: "
                 f"{len(response)}/{response_length} bytes"
@@ -393,6 +395,8 @@ class LuminaModbusServer:
             )
             # Drain any remaining stale bytes to prevent contaminating next read
             self._drain_serial_buffer(conn, port_logger)
+            # Close port to force fresh reconnect (resets UART state)
+            self._close_serial_connection(port, baudrate, port_logger)
             raise Exception(f"CRC mismatch in response")
 
         port_logger.info(f"Response: {len(response)} bytes, CRC valid")
@@ -424,6 +428,21 @@ class LuminaModbusServer:
                 conn.serial_port.timeout = old_timeout
             except:
                 pass
+
+    def _close_serial_connection(self, port: str, baudrate: int, port_logger):
+        """
+        Close serial connection and remove from pool after errors.
+        Forces a fresh reconnect on next command, which resets UART state.
+        """
+        try:
+            if baudrate in self.serial_connections.get(port, {}):
+                conn = self.serial_connections[port][baudrate]
+                if conn.serial_port.is_open:
+                    conn.serial_port.close()
+                    port_logger.info(f"Closed serial port {port} @ {baudrate} for recovery")
+                del self.serial_connections[port][baudrate]
+        except Exception as e:
+            port_logger.warning(f"Error closing serial connection: {e}")
 
     def get_serial_connection(self, port: str, baudrate: int, timeout: float) -> SerialConnection:
         """Get or create serial connection for port/baudrate."""
