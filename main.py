@@ -335,6 +335,11 @@ class LuminaModbusServer:
         conn.serial_port.write(command)
         conn.serial_port.flush()  # Ensure data is sent
 
+        # Wait for TX to physically complete before reading echo
+        # At 9600 baud: 8 bytes ≈ 8.3ms, add margin for safety
+        tx_time = (len(command) * 10) / baudrate  # 10 bits per byte (start + 8 data + stop)
+        time.sleep(tx_time + 0.005)  # TX time + 5ms margin
+
         # RS-485 half-duplex: discard TX echo before reading response
         # Many RS-485 transceivers echo transmitted data back on RX
         command_len = len(command)
@@ -343,9 +348,17 @@ class LuminaModbusServer:
             if echo == command:
                 port_logger.debug(f"Discarded TX echo ({len(echo)} bytes)")
             else:
-                # Echo doesn't match - might be noise or partial echo
+                # Echo doesn't match - might be noise, late response, or partial echo
+                # Drain any additional stale bytes before proceeding
                 echo_hex = ' '.join(f'{b:02X}' for b in echo)
-                port_logger.warning(f"Discarded unexpected echo ({len(echo)} bytes): {echo_hex}")
+                port_logger.warning(f"Discarded unexpected data ({len(echo)} bytes): {echo_hex}")
+                # Try to drain more stale data
+                conn.serial_port.timeout = 0.02
+                extra = conn.serial_port.read(64)
+                if extra:
+                    extra_hex = ' '.join(f'{b:02X}' for b in extra)
+                    port_logger.warning(f"Drained additional stale bytes: {extra_hex}")
+                conn.serial_port.timeout = timeout
 
         # Read response with retry loop for partial reads
         # (Critical: responses may arrive in chunks, especially at low baud rates)
