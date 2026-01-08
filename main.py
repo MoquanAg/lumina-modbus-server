@@ -353,6 +353,13 @@ class LuminaModbusServer:
             if first_bytes == command:
                 # It's the echo - discard and read response separately
                 port_logger.debug(f"Discarded TX echo ({len(first_bytes)} bytes)")
+                # Small delay after echo to let response start arriving
+                time.sleep(0.02)  # 20ms - gives sensor time to start responding
+
+                # Check if response has started arriving (quick non-blocking check)
+                waiting = conn.serial_port.in_waiting
+                if waiting > 0:
+                    port_logger.debug(f"Response already in buffer: {waiting} bytes")
             elif len(first_bytes) >= 3 and first_bytes[0] == slave_addr and first_bytes[1] == func_code:
                 # First bytes match slave+func but not full command
                 # This is likely the START of the response (no echo on this hardware)
@@ -372,13 +379,21 @@ class LuminaModbusServer:
                         stale_hex = ' '.join(f'{b:02X}' for b in stale)
                         port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
             else:
-                # Garbage or exception response - clear it
+                # Garbage or exception response - this is likely stale data from previous session
                 first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
                 port_logger.warning(f"Discarded unexpected data ({len(first_bytes)} bytes): {first_hex}")
-                stale = conn.serial_port.read(conn.serial_port.in_waiting)
-                if stale:
-                    stale_hex = ' '.join(f'{b:02X}' for b in stale)
-                    port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
+
+                # Aggressively clear stale data - wait and clear multiple times
+                # because data may still be arriving from previous sensor session
+                for _ in range(3):
+                    stale = conn.serial_port.read(conn.serial_port.in_waiting)
+                    if stale:
+                        stale_hex = ' '.join(f'{b:02X}' for b in stale)
+                        port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
+                    time.sleep(0.05)  # 50ms between clears to let more data arrive
+
+                # Final clear after settling
+                conn.serial_port.reset_input_buffer()
 
         # Read remaining response bytes (or full response if no echo)
         remaining_bytes = response_length - len(response)
