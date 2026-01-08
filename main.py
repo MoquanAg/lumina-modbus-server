@@ -349,16 +349,15 @@ class LuminaModbusServer:
                 port_logger.debug(f"Discarded TX echo ({len(echo)} bytes)")
             else:
                 # Echo doesn't match - might be noise, late response, or partial echo
-                # Drain any additional stale bytes before proceeding
+                # Just log and clear buffer - don't drain with timeout as we might
+                # accidentally drain the actual response that's about to arrive
                 echo_hex = ' '.join(f'{b:02X}' for b in echo)
                 port_logger.warning(f"Discarded unexpected data ({len(echo)} bytes): {echo_hex}")
-                # Try to drain more stale data
-                conn.serial_port.timeout = 0.02
-                extra = conn.serial_port.read(64)
-                if extra:
-                    extra_hex = ' '.join(f'{b:02X}' for b in extra)
-                    port_logger.warning(f"Drained additional stale bytes: {extra_hex}")
-                conn.serial_port.timeout = timeout
+                # Quick non-blocking clear of anything currently in buffer
+                stale = conn.serial_port.read(conn.serial_port.in_waiting)
+                if stale:
+                    stale_hex = ' '.join(f'{b:02X}' for b in stale)
+                    port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
 
         # Read response with retry loop for partial reads
         # (Critical: responses may arrive in chunks, especially at low baud rates)
