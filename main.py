@@ -351,6 +351,49 @@ class LuminaModbusServer:
         exception_func = func_code | 0x80  # Modbus exception has high bit set
 
         if first_bytes:
+            # First check for ANY valid Modbus exception response (even from different slave)
+            # This handles stale exceptions from previous commands that contaminate current read
+            if len(first_bytes) >= 5 and (first_bytes[1] & 0x80) != 0 and first_bytes[1] != 0xFF:
+                potential_slave = first_bytes[0]
+                potential_func = first_bytes[1] & 0x7F  # Remove exception bit
+                exception_code = first_bytes[2]
+                exception_crc = first_bytes[3:5]
+
+                # Validate exception CRC
+                expected_crc = self._calculate_crc(first_bytes[:3])
+                if exception_crc == expected_crc:
+                    exception_hex = ' '.join(f'{b:02X}' for b in first_bytes[:5])
+                    exception_names = {
+                        0x01: "Illegal Function",
+                        0x02: "Illegal Data Address",
+                        0x03: "Illegal Data Value",
+                        0x04: "Slave Device Failure",
+                    }
+                    exception_name = exception_names.get(exception_code, f"Unknown ({exception_code})")
+
+                    if potential_slave == slave_addr:
+                        # Exception from current slave - this is the actual response
+                        port_logger.error(f"Modbus exception from slave: {exception_name} - {exception_hex}")
+                        conn.serial_port.reset_input_buffer()
+                        raise Exception(f"Modbus exception: {exception_name}")
+                    else:
+                        # Stale exception from previous command to different slave
+                        port_logger.warning(
+                            f"Stale exception from slave {hex(potential_slave)} "
+                            f"(expected {hex(slave_addr)}): {exception_name} - {exception_hex}"
+                        )
+                        # Clear buffer and retry reading for current command
+                        conn.serial_port.reset_input_buffer()
+                        # Re-send the command since response was contaminated
+                        conn.serial_port.write(command)
+                        conn.serial_port.flush()
+                        tx_time = (len(command) * 10) / baudrate
+                        time.sleep(tx_time + 0.005)
+                        # Read again
+                        first_bytes = conn.serial_port.read(command_len)
+                        if not first_bytes:
+                            raise Exception("No response after clearing stale exception")
+
             if first_bytes == command:
                 # It's the echo - discard and read response separately
                 port_logger.debug(f"Discarded TX echo ({len(first_bytes)} bytes)")
@@ -358,9 +401,8 @@ class LuminaModbusServer:
                 time.sleep(0.02)  # 20ms - gives sensor time to start responding
 
             elif len(first_bytes) >= 5 and first_bytes[0] == slave_addr and first_bytes[1] == exception_func:
-                # Modbus EXCEPTION response detected!
+                # Modbus EXCEPTION response from current slave
                 # Format: slave(1) + func|0x80(1) + exception_code(1) + CRC(2) = 5 bytes
-                # We may have read extra bytes (echo start) after the exception
                 exception_response = first_bytes[:5]
                 exception_code = first_bytes[2]
                 exception_crc = first_bytes[3:5]
