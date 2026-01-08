@@ -448,19 +448,26 @@ class LuminaModbusServer:
                         stale_hex = ' '.join(f'{b:02X}' for b in stale)
                         port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
             else:
-                # Garbage data - likely stale from previous session or electrical noise
+                # Garbage data - likely mid-stream from a response we started reading at wrong offset
+                # DON'T resend immediately - the slave might still be transmitting!
                 first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
                 port_logger.warning(f"Discarded unexpected data ({len(first_bytes)} bytes): {first_hex}")
 
-                # Quick clear - just drain what's there now, don't wait too long
-                conn.serial_port.reset_input_buffer()
-                time.sleep(0.02)  # 20ms settle
+                # Wait for any in-progress transmission to complete
+                # At 9600 baud, 27 bytes takes ~28ms. Wait for full response time + margin
+                response_transmit_time = (response_length * 10) / baudrate
+                wait_time = response_transmit_time + 0.05  # Add 50ms margin
+                port_logger.debug(f"Waiting {wait_time*1000:.0f}ms for bus to settle")
+                time.sleep(wait_time)
+
+                # Now drain whatever arrived during that time
                 stale = conn.serial_port.read(conn.serial_port.in_waiting)
                 if stale:
                     stale_hex = ' '.join(f'{b:02X}' for b in stale)
-                    port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
+                    port_logger.warning(f"Cleared buffer after wait ({len(stale)} bytes): {stale_hex}")
+                conn.serial_port.reset_input_buffer()
 
-                # Re-send the command since the response was contaminated
+                # Re-send the command now that bus is idle
                 port_logger.info(f"Re-sending command after clearing garbage data")
                 conn.serial_port.write(command)
                 conn.serial_port.flush()
