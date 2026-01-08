@@ -498,15 +498,16 @@ class LuminaModbusServer:
             parity='N',
             stopbits=1,
             timeout=timeout,
-            # Hardware flow control - was in original implementation
-            # If this causes hangs, set both to False (CTS pin may be floating)
-            rtscts=True,
-            dsrdtr=True
+            # Disabled hardware flow control - Pi UART pins often not connected
+            # which can cause handshaking issues and initial command failures
+            rtscts=False,
+            dsrdtr=False
         )
 
         # Flush any stale data and let the bus settle
+        # Longer settle time helps RS-485 transceiver stabilize
         ser.reset_input_buffer()
-        time.sleep(0.05)  # 50ms settle time
+        time.sleep(0.1)  # 100ms settle time
         ser.reset_input_buffer()  # Flush again in case noise arrived
         self.logger.info(f"Flushed input buffer for {port}")
 
