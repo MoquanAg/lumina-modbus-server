@@ -452,17 +452,38 @@ class LuminaModbusServer:
                 first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
                 port_logger.warning(f"Discarded unexpected data ({len(first_bytes)} bytes): {first_hex}")
 
-                # Aggressively clear stale data - wait and clear multiple times
-                # because data may still be arriving from previous sensor session
-                for _ in range(3):
-                    stale = conn.serial_port.read(conn.serial_port.in_waiting)
-                    if stale:
-                        stale_hex = ' '.join(f'{b:02X}' for b in stale)
-                        port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
-                    time.sleep(0.05)  # 50ms between clears to let more data arrive
-
-                # Final clear after settling
+                # Quick clear - just drain what's there now, don't wait too long
                 conn.serial_port.reset_input_buffer()
+                time.sleep(0.02)  # 20ms settle
+                stale = conn.serial_port.read(conn.serial_port.in_waiting)
+                if stale:
+                    stale_hex = ' '.join(f'{b:02X}' for b in stale)
+                    port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
+
+                # Re-send the command since the response was contaminated
+                port_logger.info(f"Re-sending command after clearing garbage data")
+                conn.serial_port.write(command)
+                conn.serial_port.flush()
+                tx_time = (len(command) * 10) / baudrate
+                time.sleep(tx_time + 0.005)
+
+                # Read response start again
+                first_bytes = conn.serial_port.read(command_len)
+                if not first_bytes:
+                    raise Exception("No response after clearing garbage data")
+
+                # Check if this new read is the echo or response start
+                if first_bytes == command:
+                    port_logger.debug(f"Discarded TX echo after retry ({len(first_bytes)} bytes)")
+                    time.sleep(0.02)
+                elif len(first_bytes) >= 3 and first_bytes[0] == slave_addr and first_bytes[1] == func_code:
+                    if first_bytes[2] != command[2]:
+                        port_logger.debug(f"Got response start after retry")
+                        response = first_bytes
+                else:
+                    # Still garbage - fail fast
+                    retry_hex = ' '.join(f'{b:02X}' for b in first_bytes)
+                    raise Exception(f"Still garbage after retry: {retry_hex}")
 
         # Read remaining response bytes (or full response if no echo)
         remaining_bytes = response_length - len(response)
