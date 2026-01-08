@@ -335,6 +335,18 @@ class LuminaModbusServer:
         conn.serial_port.write(command)
         conn.serial_port.flush()  # Ensure data is sent
 
+        # RS-485 half-duplex: discard TX echo before reading response
+        # Many RS-485 transceivers echo transmitted data back on RX
+        command_len = len(command)
+        echo = conn.serial_port.read(command_len)
+        if echo:
+            if echo == command:
+                port_logger.debug(f"Discarded TX echo ({len(echo)} bytes)")
+            else:
+                # Echo doesn't match - might be noise or partial echo
+                echo_hex = ' '.join(f'{b:02X}' for b in echo)
+                port_logger.warning(f"Discarded unexpected echo ({len(echo)} bytes): {echo_hex}")
+
         # Read response with retry loop for partial reads
         # (Critical: responses may arrive in chunks, especially at low baud rates)
         response = b''
