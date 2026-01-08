@@ -473,7 +473,11 @@ class LuminaModbusServer:
             bytesize=8,
             parity='N',
             stopbits=1,
-            timeout=timeout
+            timeout=timeout,
+            # Hardware flow control - was in original implementation
+            # If this causes hangs, set both to False (CTS pin may be floating)
+            rtscts=True,
+            dsrdtr=True
         )
 
         # Flush any stale data and let the bus settle
