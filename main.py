@@ -327,24 +327,59 @@ class LuminaModbusServer:
         if time_since_last < conn.min_command_spacing:
             time.sleep(conn.min_command_spacing - time_since_last)
 
-        # Flush any stale data from input buffer
+        # Flush any stale data from both buffers
         conn.serial_port.reset_input_buffer()
+        conn.serial_port.reset_output_buffer()
 
         # Write command
         conn.serial_port.write(command)
         conn.serial_port.flush()  # Ensure data is sent
 
-        # Read response with timeout (pyserial handles this natively!)
-        response = conn.serial_port.read(response_length)
+        # Read response with retry loop for partial reads
+        # (Critical: responses may arrive in chunks, especially at low baud rates)
+        response = b''
+        remaining_bytes = response_length
+        start_time = time.time()
+        max_time = timeout
+
+        while remaining_bytes > 0 and (time.time() - start_time) < max_time:
+            # Calculate remaining time for this read attempt
+            time_elapsed = time.time() - start_time
+            time_remaining = max_time - time_elapsed
+
+            if time_remaining <= 0:
+                break
+
+            # Set timeout to remaining time (but cap at original timeout)
+            conn.serial_port.timeout = min(time_remaining, timeout)
+
+            chunk = conn.serial_port.read(remaining_bytes)
+            if chunk:
+                response += chunk
+                remaining_bytes = response_length - len(response)
+            else:
+                # No data received - log and continue waiting
+                if len(response) > 0:
+                    port_logger.debug(
+                        f"Partial read: {len(response)}/{response_length} bytes, "
+                        f"waiting {time_remaining:.2f}s more"
+                    )
+
+        # Restore original timeout
+        conn.serial_port.timeout = timeout
 
         # Update last used time
         conn.last_used = time.time()
 
         # Check if we got enough data
-        if len(response) < 4:
+        if len(response) < response_length:
+            elapsed = time.time() - start_time
             # Drain any remaining bytes that might arrive late
             self._drain_serial_buffer(conn, port_logger)
-            raise Exception(f"Response too short: {len(response)} bytes (expected {response_length})")
+            raise Exception(
+                f"Incomplete response after {elapsed:.2f}s: "
+                f"{len(response)}/{response_length} bytes"
+            )
 
         # Validate CRC
         data = response[:-2]
