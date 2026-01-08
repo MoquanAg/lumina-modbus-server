@@ -400,8 +400,8 @@ class LuminaModbusServer:
             elapsed = time.time() - start_time
             # Drain any remaining bytes that might arrive late
             self._drain_serial_buffer(conn, port_logger)
-            # Close port to force fresh reconnect (resets UART state)
-            self._close_serial_connection(port, baudrate, port_logger)
+            # Don't close port - reconnections cause more issues than they solve
+            # Just drain buffer and let next command retry on same connection
             raise Exception(
                 f"Incomplete response after {elapsed:.2f}s: "
                 f"{len(response)}/{response_length} bytes"
@@ -419,8 +419,7 @@ class LuminaModbusServer:
             )
             # Drain any remaining stale bytes to prevent contaminating next read
             self._drain_serial_buffer(conn, port_logger)
-            # Close port to force fresh reconnect (resets UART state)
-            self._close_serial_connection(port, baudrate, port_logger)
+            # Don't close port - keep connection open for retry
             raise Exception(f"CRC mismatch in response")
 
         port_logger.info(f"Response: {len(response)} bytes, CRC valid")
