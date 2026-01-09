@@ -55,7 +55,7 @@ def calculate_min_command_spacing(baudrate: int) -> float:
     if baudrate <= 4800:
         return 0.25  # 250ms for very slow rates
     elif baudrate <= 9600:
-        return 0.15  # 150ms for 9600 baud (safe for long cables up to 15m)
+        return 0.20  # 200ms for 9600 baud (increased for daisy-chained sensors)
     elif baudrate <= 19200:
         return 0.10  # 100ms for 19200 baud
     elif baudrate <= 38400:
@@ -396,7 +396,6 @@ class LuminaModbusServer:
 
             if first_bytes == command:
                 # It's the echo - discard and read response separately
-                port_logger.debug(f"Discarded TX echo ({len(first_bytes)} bytes)")
                 # Small delay after echo to let response start arriving
                 time.sleep(0.02)  # 20ms - gives sensor time to start responding
 
@@ -436,7 +435,6 @@ class LuminaModbusServer:
                 # Command has address (0x00), response has byte_count (e.g., 0x16 for 22 bytes)
                 if first_bytes[2] != command[2]:
                     # 3rd byte differs - this is the response, not echo!
-                    port_logger.debug(f"No TX echo - got response start directly")
                     response = first_bytes  # Use these bytes as start of response
                 else:
                     # Looks like partial echo or corrupted data
@@ -481,12 +479,10 @@ class LuminaModbusServer:
 
                 # Check if this new read is the echo or response start
                 if first_bytes == command:
-                    port_logger.debug(f"Discarded TX echo after retry ({len(first_bytes)} bytes)")
-                    time.sleep(0.02)
+                    time.sleep(0.02)  # Echo received, wait for response
                 elif len(first_bytes) >= 3 and first_bytes[0] == slave_addr and first_bytes[1] == func_code:
                     if first_bytes[2] != command[2]:
-                        port_logger.debug(f"Got response start after retry")
-                        response = first_bytes
+                        response = first_bytes  # Got response start after retry
                 else:
                     # Still garbage - fail fast
                     retry_hex = ' '.join(f'{b:02X}' for b in first_bytes)
@@ -513,12 +509,8 @@ class LuminaModbusServer:
                 response += chunk
                 remaining_bytes = response_length - len(response)
             else:
-                # No data received - log and continue waiting
-                if len(response) > 0:
-                    port_logger.debug(
-                        f"Partial read: {len(response)}/{response_length} bytes, "
-                        f"waiting {time_remaining:.2f}s more"
-                    )
+                # No data received - continue waiting
+                pass
 
         # Restore original timeout
         conn.serial_port.timeout = timeout
