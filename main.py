@@ -431,9 +431,36 @@ class LuminaModbusServer:
             elif len(first_bytes) >= 3 and first_bytes[0] == slave_addr and first_bytes[1] == func_code:
                 # First bytes match slave+func but not full command
                 # This is likely the START of the response (no echo on this hardware)
-                # For func 0x03: 3rd byte is byte_count, not address
-                # Command has address (0x00), response has byte_count (e.g., 0x16 for 22 bytes)
-                if first_bytes[2] != command[2]:
+
+                # Write functions (0x05, 0x06, 0x10) have shorter responses than commands.
+                # Response for 0x10 (Write Multiple): slave(1)+func(1)+addr(2)+qty(2)+CRC(2) = 8 bytes
+                # Response for 0x05 (Write Single Coil): slave(1)+func(1)+addr(2)+value(2)+CRC(2) = 8 bytes
+                # Response for 0x06 (Write Single Register): same as 0x05, 8 bytes
+                # The response starts with the same bytes as the command, so the 3rd-byte
+                # heuristic (first_bytes[2] != command[2]) fails for writes.
+                if func_code in (0x05, 0x06, 0x10):
+                    # Write response is always 8 bytes — extract it from first_bytes
+                    write_resp_len = 8
+                    if len(first_bytes) >= write_resp_len:
+                        write_response = first_bytes[:write_resp_len]
+                        expected_crc = self._calculate_crc(write_response[:write_resp_len - 2])
+                        actual_crc = write_response[write_resp_len - 2:write_resp_len]
+                        if actual_crc == expected_crc:
+                            response = write_response
+                            # Discard any extra bytes read beyond the write response
+                            extra = first_bytes[write_resp_len:]
+                            if extra:
+                                port_logger.debug(
+                                    f"Write response valid, discarding {len(extra)} extra bytes"
+                                )
+                        else:
+                            # CRC mismatch — might be echo, fall through to original logic
+                            first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
+                            port_logger.warning(f"Write response CRC mismatch ({len(first_bytes)} bytes): {first_hex}")
+                            conn.serial_port.reset_input_buffer()
+                # For read functions (0x01, 0x03, 0x04): 3rd byte is byte_count in response
+                # vs address in command, so they differ
+                elif first_bytes[2] != command[2]:
                     # 3rd byte differs - this is the response, not echo!
                     response = first_bytes  # Use these bytes as start of response
                 else:
