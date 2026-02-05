@@ -346,7 +346,10 @@ class LuminaModbusServer:
         slave_addr = command[0]
         func_code = command[1]
 
-        first_bytes = conn.serial_port.read(command_len)
+        # Read min of command_len and response_length to avoid blocking when response < command
+        # Example: read command is 8 bytes, but response for 1 register is only 7 bytes
+        initial_read_len = min(command_len, response_length)
+        first_bytes = conn.serial_port.read(initial_read_len)
         response = b''
         exception_func = func_code | 0x80  # Modbus exception has high bit set
 
@@ -389,13 +392,16 @@ class LuminaModbusServer:
                         conn.serial_port.flush()
                         tx_time = (len(command) * 10) / baudrate
                         time.sleep(tx_time + 0.005)
-                        # Read again
-                        first_bytes = conn.serial_port.read(command_len)
+                        # Read again (use min to avoid blocking on short responses)
+                        first_bytes = conn.serial_port.read(initial_read_len)
                         if not first_bytes:
                             raise Exception("No response after clearing stale exception")
 
-            if first_bytes == command:
-                # It's the echo - discard and read response separately
+            if first_bytes == command[:len(first_bytes)]:
+                # It's the echo (or start of echo) - discard and read response separately
+                # If we read fewer bytes than command, drain remaining echo bytes
+                if len(first_bytes) < command_len:
+                    remaining_echo = conn.serial_port.read(command_len - len(first_bytes))
                 # Small delay after echo to let response start arriving
                 time.sleep(0.02)  # 20ms - gives sensor time to start responding
 
@@ -524,13 +530,16 @@ class LuminaModbusServer:
                 tx_time = (len(command) * 10) / baudrate
                 time.sleep(tx_time + 0.005)
 
-                # Read response start again
-                first_bytes = conn.serial_port.read(command_len)
+                # Read response start again (use min to avoid blocking on short responses)
+                first_bytes = conn.serial_port.read(initial_read_len)
                 if not first_bytes:
                     raise Exception("No response after clearing garbage data")
 
                 # Check if this new read is the echo or response start
-                if first_bytes == command:
+                if first_bytes == command[:len(first_bytes)]:
+                    # Drain remaining echo bytes if needed
+                    if len(first_bytes) < command_len:
+                        conn.serial_port.read(command_len - len(first_bytes))
                     time.sleep(0.02)  # Echo received, wait for response
                 elif len(first_bytes) >= 3 and first_bytes[0] == slave_addr and first_bytes[1] == func_code:
                     if first_bytes[2] != command[2]:
