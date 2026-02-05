@@ -464,14 +464,39 @@ class LuminaModbusServer:
                     # 3rd byte differs - this is the response, not echo!
                     response = first_bytes  # Use these bytes as start of response
                 else:
-                    # Looks like partial echo or corrupted data
-                    first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
-                    port_logger.warning(f"Ambiguous data ({len(first_bytes)} bytes): {first_hex}")
-                    # Clear buffer and hope for the best
-                    stale = conn.serial_port.read(conn.serial_port.in_waiting)
-                    if stale:
-                        stale_hex = ' '.join(f'{b:02X}' for b in stale)
-                        port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
+                    # 3rd byte matches - could be echo OR response (when address high byte == byte_count)
+                    # Example: reading register 540 (0x021C) with count=1 → command[2]=0x02, response[2]=0x02
+                    # Use CRC validation to distinguish: a valid response will have correct CRC
+
+                    # For read functions, response length = 3 + byte_count + 2 (header + data + CRC)
+                    # byte_count for reading N registers = N * 2
+                    # If we read command_len bytes and it's a response, check if we have enough for CRC
+                    potential_byte_count = first_bytes[2]
+                    expected_resp_len = 3 + potential_byte_count + 2  # slave+func+count + data + CRC
+
+                    if len(first_bytes) >= expected_resp_len:
+                        # We have enough bytes - check CRC
+                        potential_response = first_bytes[:expected_resp_len]
+                        expected_crc = self._calculate_crc(potential_response[:-2])
+                        actual_crc = potential_response[-2:]
+
+                        if actual_crc == expected_crc:
+                            # Valid CRC - this is a real response, not echo
+                            response = potential_response
+                            port_logger.debug(f"Detected valid response via CRC (byte[2] collision)")
+                        else:
+                            # Invalid CRC - likely echo or corrupted
+                            first_hex = ' '.join(f'{b:02X}' for b in first_bytes)
+                            port_logger.warning(f"Ambiguous data with bad CRC ({len(first_bytes)} bytes): {first_hex}")
+                            stale = conn.serial_port.read(conn.serial_port.in_waiting)
+                            if stale:
+                                stale_hex = ' '.join(f'{b:02X}' for b in stale)
+                                port_logger.warning(f"Cleared buffer ({len(stale)} bytes): {stale_hex}")
+                    else:
+                        # Not enough bytes for CRC check - need to read more
+                        # Treat as partial response and continue reading
+                        response = first_bytes
+                        port_logger.debug(f"Partial data with byte[2] collision, continuing read")
             else:
                 # Garbage data - likely mid-stream from a response we started reading at wrong offset
                 # DON'T resend immediately - the slave might still be transmitting!
