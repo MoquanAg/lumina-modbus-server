@@ -106,9 +106,26 @@ class LuminaModbusServer:
 
         self.logger.info("Raw pyserial Lumina Modbus Server initialized")
 
+    def _kill_existing_server(self):
+        """Kill any existing process using our port."""
+        current_pid = os.getpid()
+        for conn in psutil.net_connections(kind='tcp'):
+            if conn.laddr.port == self.port and conn.status == 'LISTEN':
+                try:
+                    proc = psutil.Process(conn.pid)
+                    if conn.pid != current_pid:
+                        self.logger.warning(f"Killing existing server process {conn.pid} ({proc.name()}) on port {self.port}")
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired) as e:
+                    self.logger.error(f"Failed to kill process {conn.pid}: {e}")
+
     def start(self):
         """Start the Modbus server and initialize all components."""
         try:
+            # Kill any existing server on our port
+            self._kill_existing_server()
+
             # Start serial processors in thread pool
             self.logger.info("Starting serial processors with raw pyserial...")
             
