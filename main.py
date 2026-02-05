@@ -415,12 +415,30 @@ class LuminaModbusServer:
                             raise Exception("No response after clearing stale exception")
 
             if first_bytes == command[:len(first_bytes)]:
-                # It's the echo (or start of echo) - discard and read response separately
-                # If we read fewer bytes than command, drain remaining echo bytes
-                if len(first_bytes) < command_len:
-                    remaining_echo = conn.serial_port.read(command_len - len(first_bytes))
-                # Small delay after echo to let response start arriving
-                time.sleep(0.02)  # 20ms - gives sensor time to start responding
+                # First bytes match command - could be TX echo OR write response
+                # Write responses (0x05, 0x06, 0x10) are identical to the command
+                is_write_func = func_code in (0x05, 0x06, 0x10)
+
+                if is_write_func and len(first_bytes) == 8:
+                    # Write commands have 8-byte responses that match the command
+                    # Validate CRC to confirm it's a proper response (not corrupted echo)
+                    expected_crc = self._calculate_crc(first_bytes[:6])
+                    actual_crc = first_bytes[6:8]
+                    if actual_crc == expected_crc:
+                        # Valid CRC - this is the actual write response!
+                        response = first_bytes
+                        port_logger.debug(f"Detected write response (matches command with valid CRC)")
+                    else:
+                        # CRC mismatch - treat as echo and wait for real response
+                        port_logger.debug(f"Write command echo detected (CRC mismatch), waiting for response")
+                        if len(first_bytes) < command_len:
+                            remaining_echo = conn.serial_port.read(command_len - len(first_bytes))
+                        time.sleep(0.02)
+                else:
+                    # Read command echo or partial write echo - discard and read response
+                    if len(first_bytes) < command_len:
+                        remaining_echo = conn.serial_port.read(command_len - len(first_bytes))
+                    time.sleep(0.02)  # 20ms - gives sensor time to start responding
 
             elif len(first_bytes) >= 5 and first_bytes[0] == slave_addr and first_bytes[1] == exception_func:
                 # Modbus EXCEPTION response from current slave
