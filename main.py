@@ -20,6 +20,7 @@ from LuminaLogger import LuminaLogger
 import psutil
 import os
 import threading
+import select
 import socket
 import queue
 import struct
@@ -773,15 +774,19 @@ class LuminaModbusServer:
             message = f"{command_info['command_id']}:{response_hex}:{timestamp:.4f}\n"
             
             try:
+                _, writable, _ = select.select([], [command_info['socket']], [], 5.0)
+                if not writable:
+                    self.logger.warning(f"Socket send timeout for client {client_id}, skipping response")
+                    return
                 command_info['socket'].send(message.encode())
                 # Use shortened ID for logging readability
                 command_parts = command_info['command_id'].split('_')
                 short_command_id = '_'.join(command_parts[:-3])
                 self.logger.debug(f"Response for {short_command_id}: {response_hex}")
-            except (socket.error, IOError) as e:
+            except (socket.error, IOError, OSError, ValueError) as e:
                 self.logger.debug(f"Socket error while sending response: {e}")
                 return
-            
+
             # Remove from pending using FULL command_id (must match what was added)
             if client_id in self.client_pending_commands:
                 self.client_pending_commands[client_id].discard(command_info['command_id'])
@@ -801,12 +806,16 @@ class LuminaModbusServer:
             message = f"{command_info['command_id']}:ERROR:{error}:{timestamp:.6f}\n"
             
             try:
+                _, writable, _ = select.select([], [command_info['socket']], [], 5.0)
+                if not writable:
+                    self.logger.warning(f"Socket send timeout for client {client_id}, skipping error")
+                    return
                 command_info['socket'].send(message.encode())
                 self.logger.debug(f"Sent error to client {client_id}: {message.strip()}")
-            except (socket.error, IOError) as e:
+            except (socket.error, IOError, OSError, ValueError) as e:
                 self.logger.debug(f"Socket error while sending error: {e}")
                 return
-            
+
             # Remove from pending set (error is also a completed command)
             if client_id in self.client_pending_commands:
                 self.client_pending_commands[client_id].discard(command_info['command_id'])

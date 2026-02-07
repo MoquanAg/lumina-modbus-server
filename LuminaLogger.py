@@ -12,6 +12,7 @@ Features:
 
 import os
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import glob
@@ -45,6 +46,7 @@ class LuminaLogger:
         self.current_log_file = None
         self.max_file_size = 5 * 1024 * 1024  # 5 MB
         self.max_total_size = 20 * 1024 * 1024  # 20 MB
+        self._rotation_lock = threading.Lock()
         self.setup_logger()
 
     def get_total_log_size(self):
@@ -179,22 +181,24 @@ class LuminaLogger:
         Check if log rotation is needed and perform rotation if necessary.
         Rotation occurs when current file size exceeds limit or date changes.
         Also checks total log size and triggers cleanup if needed.
+        Thread-safe: uses _rotation_lock to prevent concurrent rotation.
         """
-        if not self.current_log_file:
-            self.create_new_log_file()
-            return
+        with self._rotation_lock:
+            if not self.current_log_file:
+                self.create_new_log_file()
+                return
 
-        current_date = datetime.now().strftime('%Y-%m-%d')
-        current_log_path = self.current_log_file.baseFilename
-        
-        # Check if rotation is needed
-        if os.path.getsize(current_log_path) >= self.max_file_size or \
-           os.path.basename(current_log_path) != f"{current_date}.log":
-            self.create_new_log_file()
+            current_date = datetime.now().strftime('%Y-%m-%d')
+            current_log_path = self.current_log_file.baseFilename
 
-        # Check total size and cleanup if needed
-        if self.get_total_log_size() > self.max_total_size:
-            self.cleanup_old_logs()
+            # Check if rotation is needed
+            if os.path.getsize(current_log_path) >= self.max_file_size or \
+               not os.path.basename(current_log_path).startswith(current_date):
+                self.create_new_log_file()
+
+            # Check total size and cleanup if needed
+            if self.get_total_log_size() > self.max_total_size:
+                self.cleanup_old_logs()
 
     def debug(self, message):
         """
