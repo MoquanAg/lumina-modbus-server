@@ -59,7 +59,10 @@ class LuminaLogger:
         total_size = 0
         if os.path.exists(self.log_dir):
             for log_file in glob.glob(os.path.join(self.log_dir, "*.log")):
-                total_size += os.path.getsize(log_file)
+                try:
+                    total_size += os.path.getsize(log_file)
+                except OSError:
+                    pass  # File vanished between glob() and getsize()
         return total_size
 
     def cleanup_old_logs(self):
@@ -76,8 +79,11 @@ class LuminaLogger:
             # Skip the current log file
             if self.current_log_file and log_file == self.current_log_file.baseFilename:
                 continue
-            creation_time = os.path.getctime(log_file)
-            size = os.path.getsize(log_file)
+            try:
+                creation_time = os.path.getctime(log_file)
+                size = os.path.getsize(log_file)
+            except OSError:
+                continue  # File vanished between glob() and stat()
             log_files.append((creation_time, log_file, size))
 
         # Sort by creation time (oldest first)
@@ -183,22 +189,26 @@ class LuminaLogger:
         Also checks total log size and triggers cleanup if needed.
         Thread-safe: uses _rotation_lock to prevent concurrent rotation.
         """
-        with self._rotation_lock:
-            if not self.current_log_file:
-                self.create_new_log_file()
-                return
+        try:
+            with self._rotation_lock:
+                if not self.current_log_file:
+                    self.create_new_log_file()
+                    return
 
-            current_date = datetime.now().strftime('%Y-%m-%d')
-            current_log_path = self.current_log_file.baseFilename
+                current_date = datetime.now().strftime('%Y-%m-%d')
+                current_log_path = self.current_log_file.baseFilename
 
-            # Check if rotation is needed
-            if os.path.getsize(current_log_path) >= self.max_file_size or \
-               not os.path.basename(current_log_path).startswith(current_date):
-                self.create_new_log_file()
+                # Check if rotation is needed
+                if os.path.getsize(current_log_path) >= self.max_file_size or \
+                   not os.path.basename(current_log_path).startswith(current_date):
+                    self.create_new_log_file()
 
-            # Check total size and cleanup if needed
-            if self.get_total_log_size() > self.max_total_size:
-                self.cleanup_old_logs()
+                # Check total size and cleanup if needed
+                if self.get_total_log_size() > self.max_total_size:
+                    self.cleanup_old_logs()
+        except Exception as e:
+            import sys
+            print(f"[LuminaLogger:{self.name}] Log rotation failed: {e}", file=sys.stderr, flush=True)
 
     def debug(self, message):
         """

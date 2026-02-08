@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from LuminaLogger import LuminaLogger
 import psutil
 import os
+import signal
 import threading
 import select
 import socket
@@ -923,10 +924,93 @@ class LuminaModbusServer:
         self.logger.info("Server stopped")
 
 
+def write_crash_log(exc, server=None):
+    """Write crash diagnostics using raw file I/O (not LuminaLogger, which may be broken)."""
+    import traceback
+    import sys
+
+    log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    crash_path = os.path.join(log_dir, 'crash.log')
+
+    try:
+        with open(crash_path, 'a') as f:
+            f.write(f"\n{'='*72}\n")
+            f.write(f"CRASH at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"{'='*72}\n\n")
+
+            # Exception traceback
+            f.write("--- Exception ---\n")
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=f)
+            f.write("\n")
+
+            # Thread state dump
+            f.write("--- Thread Stacks ---\n")
+            for thread_id, frame in sys._current_frames().items():
+                thread_name = "unknown"
+                for t in threading.enumerate():
+                    if t.ident == thread_id:
+                        thread_name = t.name
+                        break
+                f.write(f"\nThread {thread_id} ({thread_name}):\n")
+                traceback.print_stack(frame, file=f)
+
+            # Server state
+            if server:
+                f.write("\n--- Server State ---\n")
+                f.write(f"Active clients: {len(server.clients)}\n")
+                for port in AVAILABLE_PORTS:
+                    qsize = server.command_queues[port].qsize()
+                    last_activity = time.time() - server.port_last_activity.get(port, 0)
+                    f.write(f"  {port}: queue={qsize}, idle={last_activity:.1f}s\n")
+
+            f.write(f"\n{'='*72}\n")
+            f.flush()
+    except Exception:
+        # Last resort — if even crash logging fails, print to stderr
+        print(f"CRASH (could not write {crash_path}): {exc}", flush=True)
+        traceback.print_exc()
+
+
+def signal_handler(signum, frame, server=None):
+    """Handle SIGTERM so external kills are logged before exit."""
+    sig_name = signal.Signals(signum).name
+    msg = f"Received {sig_name} at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    print(msg, flush=True)
+
+    # Write to crash.log for post-mortem
+    log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    try:
+        with open(os.path.join(log_dir, 'crash.log'), 'a') as f:
+            f.write(f"\n{'='*72}\n")
+            f.write(f"SIGNAL: {msg}\n")
+            f.write(f"{'='*72}\n")
+            f.flush()
+    except Exception:
+        pass
+
+    if server:
+        server.stop()
+    os._exit(1)
+
+
 if __name__ == "__main__":
     server = LuminaModbusServer()
+
+    # Install SIGTERM handler so external kills leave a trace
+    signal.signal(signal.SIGTERM, lambda sig, frame: signal_handler(sig, frame, server))
+
     try:
         server.start()
     except KeyboardInterrupt:
         print("\nShutting down...")
         server.stop()
+    except Exception as exc:
+        write_crash_log(exc, server)
+        print(f"FATAL: {exc} (see logs/crash.log)", flush=True)
+        try:
+            server.stop()
+        except Exception:
+            pass
+        os._exit(1)
