@@ -105,6 +105,9 @@ class LuminaModbusServer:
         # Shutdown event
         self.shutdown_event = threading.Event()
 
+        # Port activity tracking for watchdog (Layer 1: freeze detection)
+        self.port_last_activity = {port: time.time() for port in AVAILABLE_PORTS}
+
         self.logger.info("Raw pyserial Lumina Modbus Server initialized")
 
     def _kill_existing_server(self):
@@ -143,6 +146,14 @@ class LuminaModbusServer:
                 thread.start()
                 self.processor_threads.append(thread)
                 
+            # Start port watchdog thread (detects frozen serial processors)
+            self.watchdog_thread = threading.Thread(
+                target=self._port_watchdog,
+                name="port_watchdog",
+                daemon=True
+            )
+            self.watchdog_thread.start()
+
             # Start TCP server in main thread
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -270,6 +281,9 @@ class LuminaModbusServer:
 
         while not self.shutdown_event.is_set():
             try:
+                # Update activity timestamp (watchdog checks this)
+                self.port_last_activity[port] = time.time()
+
                 command_info = None
                 try:
                     command_info = self.command_queues[port].get(timeout=1.0)
@@ -686,6 +700,46 @@ class LuminaModbusServer:
                 del self.serial_connections[port][baudrate]
         except Exception as e:
             port_logger.warning(f"Error closing serial connection: {e}")
+
+    def _port_watchdog(self):
+        """
+        Watchdog thread that detects frozen serial processor threads.
+
+        Runs every 30s. If a port hasn't updated its activity timestamp in 120s,
+        closes all serial connections for that port. This causes the blocked
+        serial_port.read() to raise SerialException, which the existing handler
+        catches, sends an error to the client, and the thread continues.
+        """
+        WATCHDOG_CHECK_INTERVAL = 30  # seconds
+        FROZEN_THRESHOLD = 120  # seconds - 2 minutes without activity = frozen
+
+        self.logger.info(f"Port watchdog started (check every {WATCHDOG_CHECK_INTERVAL}s, freeze threshold {FROZEN_THRESHOLD}s)")
+
+        while not self.shutdown_event.is_set():
+            try:
+                self.shutdown_event.wait(timeout=WATCHDOG_CHECK_INTERVAL)
+                if self.shutdown_event.is_set():
+                    break
+
+                now = time.time()
+                for port in AVAILABLE_PORTS:
+                    elapsed = now - self.port_last_activity[port]
+                    if elapsed > FROZEN_THRESHOLD:
+                        port_logger = self.port_loggers[port]
+                        port_logger.error(
+                            f"WATCHDOG: Port {port} appears frozen "
+                            f"(no activity for {elapsed:.0f}s > {FROZEN_THRESHOLD}s). "
+                            f"Closing serial connections to unstick thread."
+                        )
+                        # Close all baudrate connections for this port
+                        for baudrate in list(self.serial_connections.get(port, {}).keys()):
+                            self._close_serial_connection(port, baudrate, port_logger)
+                        # Reset timer so we don't spam close attempts
+                        self.port_last_activity[port] = now
+            except Exception as e:
+                self.logger.error(f"Port watchdog error: {e}")
+
+        self.logger.info("Port watchdog stopped")
 
     def get_serial_connection(self, port: str, baudrate: int, timeout: float) -> SerialConnection:
         """Get or create serial connection for port/baudrate."""
