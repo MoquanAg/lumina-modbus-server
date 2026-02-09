@@ -23,6 +23,11 @@ telnet 127.0.0.1 8888
 # Format: command_id:device_type:port:baudrate:command_hex:response_length:timeout
 ```
 
+## Process Management
+
+- **ONLY use `start_modbus_server.sh`** to start the server — it launches an lxterminal GUI window. Do NOT use `systemctl`, `setsid`, `nohup`, or any background/headless process method.
+- The start script handles: venv activation, killing existing processes, and launching in a visible terminal.
+
 ## Architecture
 
 ```
