@@ -46,6 +46,9 @@ Protocol: `command_id:device_type:port:baudrate:hex:length:timeout\n` → `comma
 - **No asyncio**: Purely synchronous I/O—simpler and more reliable timeouts
 - **Manual CRC validation**: Server validates CRC on responses, drains buffer on mismatch
 - **Fail fast**: No retries in server—CRC errors return immediately, client decides retry policy
+- **Port watchdog**: Detects frozen per-port serial threads (120s inactivity threshold). Recovers by closing serial connections, forcing the blocked `read()` to raise `SerialException`. Runs every 30s.
+- **Write response validation**: Modbus write functions (0x05, 0x06, 0x10) return responses identical to command bytes. CRC validation distinguishes actual write responses from TX echoes.
+- **Crash diagnostics**: Raw file I/O crash logger (bypasses LuminaLogger) captures full thread dumps and server state on unhandled exceptions. Log rotation protected with thread-safe locking.
 - Server runs separately from client processes—communicate via TCP only
 - Available ports hardcoded in `AVAILABLE_PORTS` constant
 
