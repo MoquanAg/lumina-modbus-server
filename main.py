@@ -772,6 +772,7 @@ class LuminaModbusServer:
             parity='N',
             stopbits=1,
             timeout=timeout,
+            write_timeout=timeout,
             # Disabled hardware flow control - Pi UART pins often not connected
             # which can cause handshaking issues and initial command failures
             rtscts=False,
