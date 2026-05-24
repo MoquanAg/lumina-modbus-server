@@ -213,14 +213,19 @@ class LuminaModbusServer:
 
     def process_client_message(self, client_id: int, message: str, client_socket):
         """Parse client message and queue command for processing"""
+        command_info = None
+        port = None
         try:
-            # Protocol: command_id:device_type:port:baudrate:command_hex:response_length:timeout
+            # Protocol: command_id:device_type:port:baudrate:command_hex:response_length[:timeout]
+            # timeout field is optional; defaults to 5.0 seconds for backward compatibility
             parts = message.split(':')
-            if len(parts) < 7:
+            if len(parts) < 6:
                 self.logger.error(f"Invalid message format from client {client_id}: {message}")
                 return
-            
-            command_id, device_type, port, baudrate, command_hex, response_length, timeout = parts[:7]
+
+            command_id, device_type, port, baudrate, command_hex, response_length = parts[:6]
+            # Accept both 6-field (no timeout) and 7-field (with timeout) protocol versions
+            timeout = parts[6] if len(parts) >= 7 else '5.0'
             
             # Validate port
             if port not in AVAILABLE_PORTS:
@@ -270,8 +275,11 @@ class LuminaModbusServer:
             self.client_pending_commands[client_id].add(command_id)
             
         except queue.Full:
-            self.logger.error(f"Command queue full for {port}")
-            self.send_error_sync(command_info, "queue_full")
+            if command_info and port:
+                self.logger.error(f"Command queue full for {port}")
+                self.send_error_sync(command_info, "queue_full")
+            else:
+                self.logger.error(f"Command queue full (command_info unavailable)")
         except Exception as e:
             self.logger.error(f"Error processing client message: {str(e)}")
 
