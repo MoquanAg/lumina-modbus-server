@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from LuminaLogger import LuminaLogger
 import psutil
 import os
+import json
 import signal
 import threading
 import select
@@ -39,7 +40,29 @@ class SerialConnection:
     min_command_spacing: float = 0.05  # Will be set dynamically based on baudrate
 
 
-def calculate_min_command_spacing(baudrate: int) -> float:
+def _load_spacing_overrides(path: str = None) -> dict:
+    """Load optional per-device command-spacing overrides from JSON.
+
+    Returns a {baudrate: seconds} mapping read from an untracked
+    spacing_overrides.json next to this module (or an explicit path, for tests).
+    A missing or malformed file yields {} (stock behavior). This lets a device
+    tune spacing via config instead of a local code edit — e.g. hengyuan's
+    ttyAMA1 reflection workaround until a far-end 120Ω terminator is fitted.
+    """
+    if path is None:
+        path = os.path.join(os.path.dirname(__file__), 'spacing_overrides.json')
+    try:
+        with open(path) as f:
+            return {int(k): float(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+# Loaded once at import; the per-device override file is gitignored.
+_SPACING_OVERRIDES = _load_spacing_overrides()
+
+
+def calculate_min_command_spacing(baudrate: int, overrides: dict = None) -> float:
     """
     Calculate minimum command spacing based on baud rate.
 
@@ -48,12 +71,19 @@ def calculate_min_command_spacing(baudrate: int) -> float:
     - Device turnaround time (time for slave to process and respond)
     - Cable propagation delays (more significant with longer cables)
 
+    A per-device override (keyed by baud rate, from spacing_overrides.json) takes
+    precedence over the built-in defaults when present.
+
     Args:
         baudrate: Serial baud rate (e.g., 9600, 19200, 115200)
+        overrides: Optional {baudrate: seconds} map; defaults to the file-loaded set
 
     Returns:
         Minimum spacing in seconds between commands on the same port
     """
+    overrides = _SPACING_OVERRIDES if overrides is None else overrides
+    if baudrate in overrides:
+        return overrides[baudrate]
     if baudrate <= 4800:
         return 0.25  # 250ms for very slow rates
     elif baudrate <= 9600:
