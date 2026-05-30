@@ -1,262 +1,128 @@
 """
-LuminaLogger: A robust logging utility for managing rotational logs with size limits.
-Provides daily log rotation and size-based splitting with consistent formatting.
+LuminaLogger: per-logger rotating file logs with a bounded on-disk footprint.
+
+Each logger instance writes to its OWN name-scoped file (``<name>.log``) via the
+standard-library ``RotatingFileHandler``. Because filenames are scoped by logger
+name and rotation is atomic, multiple instances sharing a directory never collide
+on a shared file or delete each other's still-open logs — which previously let
+``lumina-modbus-server`` leak gigabytes of deleted-but-open logs and fill the eMMC.
 
 Features:
-- Automatic log rotation based on date and size
-- Console and file logging
-- Configurable log directory and file size limits
+- Per-instance, name-scoped log file with automatic size-based rotation
+- Bounded total size: ``max_file_size`` x (backups + 1) == ``max_total_size``
+- Console + file output with consistent formatting
 - Standard logging levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- Total log size limit with automatic cleanup of oldest files
 """
 
 import os
+import re
 import logging
-import threading
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
-import glob
+
 
 class LuminaLogger:
-    """
-    A robust logging utility for managing rotational logs with size limits.
-    
+    """A logging utility that keeps each logger's on-disk footprint bounded.
+
     Attributes:
-        name (str): Logger identifier name
-        log_dir (str): Directory path for log files
-        logger (logging.Logger): Python logger instance
-        current_log_file (RotatingFileHandler): Current file handler
-        max_file_size (int): Maximum size of each log file in bytes
-        max_total_size (int): Maximum total size of all log files in bytes
+        name (str): Logger identifier name.
+        log_dir (str): Directory path for log files.
+        logger (logging.Logger): Underlying Python logger.
+        max_file_size (int): Max size of each log file in bytes (rotation threshold).
+        max_total_size (int): Max total size of this logger's files in bytes.
+        backup_count (int): Number of rotated backups kept (derived from the sizes).
+        current_log_file (RotatingFileHandler): The active rotating file handler.
     """
 
-    def __init__(self, name, log_dir='logs'):
-        """
-        Initialize the logger with name and directory.
+    def __init__(self, name, log_dir='logs',
+                 max_file_size=5 * 1024 * 1024,
+                 max_total_size=20 * 1024 * 1024):
+        """Initialize the logger.
 
         Args:
-            name (str): Name identifier for the logger
-            log_dir (str): Directory path for storing log files, defaults to 'logs'
+            name (str): Name identifier for the logger; also the log file stem.
+            log_dir (str): Directory (relative to this module) for log files.
+            max_file_size (int): Per-file rotation threshold in bytes.
+            max_total_size (int): Total budget in bytes for this logger's files.
         """
         self.name = name
-        # Use current directory as base
         self.log_dir = os.path.join(os.path.dirname(__file__), log_dir)
-        self.logger = logging.getLogger(name)
-        self.logger.setLevel(logging.DEBUG)
-        self.current_log_file = None
-        self.max_file_size = 5 * 1024 * 1024  # 5 MB
-        self.max_total_size = 20 * 1024 * 1024  # 20 MB
-        self._rotation_lock = threading.Lock()
-        self.setup_logger()
+        self.max_file_size = max_file_size
+        self.max_total_size = max_total_size
+        # Total budget = max_file_size * (backup_count + 1); always keep >= 1 backup.
+        self.backup_count = max(1, (max_total_size // max_file_size) - 1)
 
-    def get_total_log_size(self):
-        """
-        Calculate the total size of all log files in the log directory.
-
-        Returns:
-            int: Total size in bytes
-        """
-        total_size = 0
-        if os.path.exists(self.log_dir):
-            for log_file in glob.glob(os.path.join(self.log_dir, "*.log")):
-                try:
-                    total_size += os.path.getsize(log_file)
-                except OSError:
-                    pass  # File vanished between glob() and getsize()
-        return total_size
-
-    def cleanup_old_logs(self):
-        """
-        Remove oldest log files when total size exceeds max_total_size.
-        Files are removed in order of oldest to newest until total size is under limit.
-        """
-        if not os.path.exists(self.log_dir):
-            return
-
-        # Get list of all log files with their creation times
-        log_files = []
-        for log_file in glob.glob(os.path.join(self.log_dir, "*.log")):
-            # Skip the current log file
-            if self.current_log_file and log_file == self.current_log_file.baseFilename:
-                continue
-            try:
-                creation_time = os.path.getctime(log_file)
-                size = os.path.getsize(log_file)
-            except OSError:
-                continue  # File vanished between glob() and stat()
-            log_files.append((creation_time, log_file, size))
-
-        # Sort by creation time (oldest first)
-        log_files.sort()
-
-        # Calculate current total size
-        total_size = self.get_total_log_size()
-
-        # Remove oldest files until we're under the limit
-        for _, file_path, size in log_files:
-            if total_size <= self.max_total_size:
-                break
-            try:
-                os.remove(file_path)
-                total_size -= size
-                self.logger.info(f"Removed old log file: {os.path.basename(file_path)}")
-            except OSError as e:
-                self.logger.error(f"Error removing old log file {file_path}: {str(e)}")
-
-    def setup_logger(self):
-        """
-        Configure the logger with console and file handlers.
-        Creates log directory and initializes handlers with formatters.
-        """
-        # Create logs directory if it doesn't exist
         os.makedirs(self.log_dir, exist_ok=True)
 
-        # Clear any existing handlers
-        self.logger.handlers = []
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(logging.DEBUG)
+        # Re-init safely: close and drop any handlers left by a prior instance of
+        # this same name so we never leak file descriptors or double-log.
+        for handler in list(self.logger.handlers):
+            try:
+                handler.close()
+            except Exception:
+                pass
+            self.logger.removeHandler(handler)
+        # Self-contained: don't propagate to the root logger (avoids double output).
+        self.logger.propagate = False
 
-        # Set root logger to DEBUG to ensure all logs are shown
-        logging.getLogger().setLevel(logging.DEBUG)
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-        # Create a new log file
-        self.create_new_log_file()
-
-        # Create console handler with DEBUG level (show all logs)
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.DEBUG)  # Set to DEBUG to show all logs
-        console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_handler.setFormatter(console_formatter)
-
-        # Add handlers to logger
-        self.logger.addHandler(console_handler)
-        
-        # Ensure propagation is enabled for complete logging
-        self.logger.propagate = True
-
-        # Initial cleanup of old logs
-        self.cleanup_old_logs()
-
-    def create_new_log_file(self):
-        """
-        Create a new log file and set up its handler.
-        Removes old file handler if exists and creates a new one with rotation settings.
-        """
-        # Remove old file handler if exists and close it properly
-        if self.current_log_file:
-            self.logger.removeHandler(self.current_log_file)
-            self.current_log_file.close()  # Close the file handler explicitly
-
-        # Create new log file name
-        current_date = datetime.now().strftime('%Y-%m-%d')
-        log_file_path = self.get_available_log_file_path(current_date)
-
-        # Create rotating file handler with DEBUG level
-        file_handler = logging.FileHandler(log_file_path)
-        file_handler.setLevel(logging.DEBUG)  # Ensure DEBUG level for file handler
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(file_formatter)
-
-        # Add file handler to logger
+        # One name-scoped rotating file per logger instance. RotatingFileHandler
+        # renames <name>.log -> <name>.log.1 ... atomically and deletes the oldest
+        # backup, so the footprint is hard-capped and nothing is held open after
+        # deletion.
+        file_handler = RotatingFileHandler(
+            os.path.join(self.log_dir, f'{self._safe_name(name)}.log'),
+            maxBytes=max_file_size,
+            backupCount=self.backup_count,
+            encoding='utf-8',
+            delay=True,
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
         self.current_log_file = file_handler
 
-        # Check and cleanup old logs if needed
-        self.cleanup_old_logs()
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
 
-    def get_available_log_file_path(self, current_date):
-        """
-        Generate an available file path for new log file.
+    @staticmethod
+    def _safe_name(name):
+        """Return a filesystem-safe stem for the log file name."""
+        return re.sub(r'[^A-Za-z0-9._-]', '_', str(name)) or 'lumina'
 
-        Args:
-            current_date (str): Date string in YYYY-MM-DD format
-
-        Returns:
-            str: Available file path for the new log file
-        """
-        base_name = f"{current_date}.log"
-        log_file_path = os.path.join(self.log_dir, base_name)
-        suffix = 1
-
-        while os.path.exists(log_file_path) and os.path.getsize(log_file_path) >= self.max_file_size:
-            log_file_path = os.path.join(self.log_dir, f"{current_date}_{suffix}.log")
-            suffix += 1
-
-        return log_file_path
-
-    def check_and_rotate_log(self):
-        """
-        Check if log rotation is needed and perform rotation if necessary.
-        Rotation occurs when current file size exceeds limit or date changes.
-        Also checks total log size and triggers cleanup if needed.
-        Thread-safe: uses _rotation_lock to prevent concurrent rotation.
-        """
-        try:
-            with self._rotation_lock:
-                if not self.current_log_file:
-                    self.create_new_log_file()
-                    return
-
-                current_date = datetime.now().strftime('%Y-%m-%d')
-                current_log_path = self.current_log_file.baseFilename
-
-                # Check if rotation is needed
-                if os.path.getsize(current_log_path) >= self.max_file_size or \
-                   not os.path.basename(current_log_path).startswith(current_date):
-                    self.create_new_log_file()
-
-                # Check total size and cleanup if needed
-                if self.get_total_log_size() > self.max_total_size:
-                    self.cleanup_old_logs()
-        except Exception as e:
-            import sys
-            print(f"[LuminaLogger:{self.name}] Log rotation failed: {e}", file=sys.stderr, flush=True)
+    def get_total_log_size(self):
+        """Return the total size in bytes of this logger's files (base + backups)."""
+        base = os.path.join(self.log_dir, f'{self._safe_name(self.name)}.log')
+        candidates = [base] + [f'{base}.{i}' for i in range(1, self.backup_count + 1)]
+        total = 0
+        for path in candidates:
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                pass  # Not yet created or already rotated away.
+        return total
 
     def debug(self, message):
-        """
-        Log a debug level message.
-
-        Args:
-            message (str): Debug message to log
-        """
-        self.check_and_rotate_log()
+        """Log a debug-level message."""
         self.logger.debug(message)
 
     def info(self, message):
-        """
-        Log an info level message.
-
-        Args:
-            message (str): Info message to log
-        """
-        self.check_and_rotate_log()
+        """Log an info-level message."""
         self.logger.info(message)
 
     def warning(self, message):
-        """
-        Log a warning level message.
-
-        Args:
-            message (str): Warning message to log
-        """
-        self.check_and_rotate_log()
+        """Log a warning-level message."""
         self.logger.warning(message)
 
     def error(self, message, exc_info=None):
-        """
-        Log an error level message.
-
-        Args:
-            message (str): Error message to log
-            exc_info (bool): If True, includes exception traceback information
-        """
-        self.check_and_rotate_log()
+        """Log an error-level message, optionally with exception info."""
         self.logger.error(message, exc_info=exc_info)
 
     def critical(self, message):
-        """
-        Log a critical level message.
-
-        Args:
-            message (str): Critical message to log
-        """
-        self.check_and_rotate_log()
+        """Log a critical-level message."""
         self.logger.critical(message)
