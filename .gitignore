@@ -26,3 +26,6 @@ eggs/
 # Claude Code
 .claude/
 *.swp
+
+# Per-device command-spacing overrides (untracked)
+spacing_overrides.json
