@@ -543,6 +543,126 @@ def test_scan_profile_preserves_unknown_responses_without_include_misses(monkeyp
     assert all(result.status == "UNKNOWN" for result in results)
 
 
+def test_th_scan_keeps_one_best_candidate_per_address(monkeypatch):
+    scanner = load_scanner()
+
+    def fake_probe(**kwargs):
+        reading = scanner.SensorReading(
+            sensor_type="TEMP",
+            vendor="SHANHENG",
+            temperature_c=18.1,
+            humidity_pct=None,
+            co2_ppm=None,
+            raw_hex="00",
+        )
+        return scanner.ScanResult(
+            port=kwargs["port"],
+            baudrate=kwargs["baudrate"],
+            address=kwargs["address"],
+            probe_registers=kwargs["register_count"],
+            reading=reading,
+            status="CANDIDATE",
+        )
+
+    monkeypatch.setattr(scanner, "probe_address", fake_probe)
+
+    results = scanner.scan_sensors(
+        ports=["/dev/ttyAMA1"],
+        baudrates=[9600],
+        addresses=[0x72],
+        modbus_host="127.0.0.1",
+        modbus_port=8888,
+        timeout=0.7,
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "CANDIDATE"
+    assert results[0].probe_registers == 11
+
+
+def test_th_scan_keeps_diagnostic_evidence_beside_candidate(monkeypatch):
+    scanner = load_scanner()
+
+    def fake_probe(**kwargs):
+        if kwargs["register_count"] == 2:
+            return scanner.ScanResult(
+                port=kwargs["port"],
+                baudrate=kwargs["baudrate"],
+                address=kwargs["address"],
+                probe_registers=2,
+                reading=None,
+                status="ERROR",
+                note="response was not hex",
+            )
+        return scanner.ScanResult(
+            port=kwargs["port"],
+            baudrate=kwargs["baudrate"],
+            address=kwargs["address"],
+            probe_registers=11,
+            reading=scanner.SensorReading(
+                sensor_type="TEMP",
+                vendor="SHANHENG",
+                temperature_c=18.1,
+                humidity_pct=None,
+                co2_ppm=None,
+                raw_hex="00",
+            ),
+            status="CANDIDATE",
+        )
+
+    monkeypatch.setattr(scanner, "probe_address", fake_probe)
+
+    results = scanner.scan_sensors(
+        ports=["/dev/ttyAMA1"],
+        baudrates=[9600],
+        addresses=[0x72],
+        modbus_host="127.0.0.1",
+        modbus_port=8888,
+        timeout=0.7,
+    )
+
+    assert [result.status for result in results] == ["CANDIDATE", "ERROR"]
+
+
+def test_th_scan_keeps_diagnostic_evidence_beside_found_result(monkeypatch):
+    scanner = load_scanner()
+
+    def fake_probe(**kwargs):
+        status = "ERROR" if kwargs["register_count"] == 11 else "FOUND"
+        reading = None
+        if status == "FOUND":
+            reading = scanner.SensorReading(
+                sensor_type="TH",
+                vendor="SHANHENG",
+                temperature_c=18.1,
+                humidity_pct=65.0,
+                co2_ppm=None,
+                raw_hex="00",
+            )
+        return scanner.ScanResult(
+            port=kwargs["port"],
+            baudrate=kwargs["baudrate"],
+            address=kwargs["address"],
+            probe_registers=kwargs["register_count"],
+            reading=reading,
+            status=status,
+            note="response was not hex" if status == "ERROR" else "",
+        )
+
+    monkeypatch.setattr(scanner, "probe_address", fake_probe)
+
+    results = scanner.scan_sensors(
+        ports=["/dev/ttyAMA1"],
+        baudrates=[9600],
+        addresses=[0x72],
+        modbus_host="127.0.0.1",
+        modbus_port=8888,
+        timeout=0.7,
+    )
+
+    assert [result.status for result in results] == ["FOUND", "ERROR"]
+
+
 def test_probe_and_scan_preserve_modbus_exceptions_without_include_misses(monkeypatch):
     scanner = load_scanner()
 

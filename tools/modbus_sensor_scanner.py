@@ -834,15 +834,26 @@ def scan_sensors(
                     )
                     address_results.append(result)
                     if result.found:
-                        results.append(result)
                         break
 
-                if not any(result.found for result in address_results):
-                    evidence = [item for item in address_results if item.status != "MISS"]
-                    if evidence:
-                        results.extend(evidence)
-                    elif include_misses:
-                        results.extend(address_results)
+                primary = next(
+                    (item for item in address_results if item.status == "FOUND"),
+                    None,
+                )
+                if primary is None:
+                    primary = next(
+                        (item for item in address_results if item.status == "CANDIDATE"),
+                        None,
+                    )
+                if primary is not None:
+                    results.append(primary)
+                results.extend(
+                    item
+                    for item in address_results
+                    if item.status not in {"FOUND", "CANDIDATE", "MISS"}
+                )
+                if include_misses:
+                    results.extend(item for item in address_results if item.status == "MISS")
     return results
 
 
