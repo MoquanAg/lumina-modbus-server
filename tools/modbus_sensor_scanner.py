@@ -39,7 +39,7 @@ class SensorReading:
         sensor_type: str,
         vendor: str,
         temperature_c: float,
-        humidity_pct: float,
+        humidity_pct: float | None,
         co2_ppm: float | None,
         raw_hex: str,
     ) -> None:
@@ -55,7 +55,7 @@ class SensorReading:
             "sensor_type": self.sensor_type,
             "vendor": self.vendor,
             "temperature_c": round(self.temperature_c, 2),
-            "humidity_pct": round(self.humidity_pct, 2),
+            "humidity_pct": None if self.humidity_pct is None else round(self.humidity_pct, 2),
             "co2_ppm": None if self.co2_ppm is None else round(self.co2_ppm, 1),
             "raw_hex": self.raw_hex,
         }
@@ -260,6 +260,21 @@ def decode_sensor_response(response: bytes, expected_address: int) -> SensorRead
     registers = _parse_registers(response)
     if registers is None:
         return None
+
+    # Temperature-only probes use the legacy SHANHENG register layout but
+    # leave the humidity register at zero. Treat that as missing humidity
+    # before trying the swapped WMS layout, where it can look like 0 C air.
+    if len(registers) >= 2 and registers[1] == 0:
+        temperature_c = _signed16(registers[0]) * 0.1
+        if -50 < temperature_c < 100:
+            return SensorReading(
+                sensor_type="TEMP",
+                vendor="SHANHENG",
+                temperature_c=temperature_c,
+                humidity_pct=None,
+                co2_ppm=None,
+                raw_hex=response.hex(),
+            )
 
     candidates: list[SensorReading] = []
     for vendor in ("SHANHENG", "WMS"):

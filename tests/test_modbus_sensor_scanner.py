@@ -78,6 +78,32 @@ def test_decode_wms_layout_when_registers_are_swapped():
     assert reading.humidity_pct == pytest.approx(60.2)
 
 
+@pytest.mark.parametrize(
+    ("response_hex", "address", "temperature_c"),
+    [
+        ("71030400cc00004bcb", 0x71, 20.4),
+        ("72031600a60000000000a60000000000000000070800000000eec2", 0x72, 16.6),
+        ("82031600ba0000000000ba00000000000000000708000000002a56", 0x82, 18.6),
+    ],
+)
+def test_decode_shanheng_temperature_only_response_with_zero_humidity(
+    response_hex, address, temperature_c
+):
+    scanner = load_scanner()
+
+    reading = scanner.decode_sensor_response(
+        bytes.fromhex(response_hex),
+        expected_address=address,
+    )
+
+    assert reading is not None
+    assert reading.sensor_type == "TEMP"
+    assert reading.vendor == "SHANHENG"
+    assert reading.temperature_c == pytest.approx(temperature_c)
+    assert reading.humidity_pct is None
+    assert reading.co2_ppm is None
+
+
 def test_decode_rejects_wrong_address_and_bad_crc():
     scanner = load_scanner()
 
