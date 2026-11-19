@@ -398,6 +398,10 @@ class LuminaModbusServer:
         if time_since_last < conn.min_command_spacing:
             time.sleep(conn.min_command_spacing - time_since_last)
 
+        # Baud belongs to the physical tty, shared by all cached descriptors.
+        # Reapply even if this object's cached value already matches the request.
+        conn.serial_port.baudrate = baudrate
+
         # Flush any stale data from both buffers
         conn.serial_port.reset_input_buffer()
         conn.serial_port.reset_output_buffer()
