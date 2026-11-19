@@ -125,6 +125,17 @@ def test_crc_valid_wrong_byte_count_is_not_a_status_read(rig):
         server.execute_serial_command(PORT, info)
 
 
+@pytest.mark.parametrize('echo', [False, True])
+def test_valid_response_with_request_header_is_not_mistaken_for_echo(rig, echo):
+    server, serial, _, _ = rig
+    info = queued(server)
+    info['command'] = bytes.fromhex('4103020000018b72')
+    info['response_length'] = 7
+    response = bytes.fromhex('4103020050b9b7')
+    respond(serial, (info['command'] if echo else b'') + response)
+    assert server.execute_serial_command(PORT, info) == response
+
+
 @pytest.mark.parametrize('budget', ['nan', 'inf', '-1', '0', '31', 'bad'])
 def test_bad_budget_is_rejected_before_queueing(rig, budget):
     server, serial, _, _ = rig

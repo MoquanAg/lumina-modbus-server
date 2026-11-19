@@ -764,13 +764,21 @@ class LuminaModbusServer:
             if header[1] & 0x80:
                 response = header + read_exact(2)
             else:
-                # Read requests can be echoed by half-duplex transceivers.
-                if command[1] in (3, 4) and header == command[:3]:
-                    echo = header + read_exact(len(command) - 3)
+                initial_size = min(len(command), info['response_length'])
+                initial = header + read_exact(initial_size - 3)
+                valid_short_reply = (len(initial) == info['response_length']
+                                     and initial[-2:] == self._calculate_crc(initial[:-2]))
+                # A matching three-byte header alone is ambiguous (e.g. FC03,
+                # address 0x0200/count 1). Consume only a complete request echo.
+                if (command[1] in (3, 4) and not valid_short_reply
+                        and initial == command[:len(initial)]):
+                    echo = initial + read_exact(len(command) - len(initial))
                     if echo != command:
                         raise ValueError("Contaminated request echo")
-                    header = read_exact(3)
-                response = header + read_exact(info['response_length'] - 3)
+                    initial = read_exact(3)
+                    if initial[1] & 0x80:
+                        raise ValueError("Modbus exception after request echo")
+                response = initial + read_exact(info['response_length'] - len(initial))
             if response[-2:] != self._calculate_crc(response[:-2]):
                 raise ValueError("CRC mismatch in response")
             if response[0] != command[0] or response[1] != command[1]:
