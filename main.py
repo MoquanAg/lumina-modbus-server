@@ -22,6 +22,7 @@ import os
 import json
 import signal
 import threading
+import math
 import select
 import socket
 import queue
@@ -274,6 +275,12 @@ class LuminaModbusServer:
                 baudrate_int = int(baudrate)
                 response_length_int = int(response_length)
                 timeout_float = float(timeout)
+                queue_budget = float(parts[7]) if len(parts) == 8 else None
+                if queue_budget is not None and (
+                    not math.isfinite(queue_budget) or not 0 < queue_budget <= 30
+                    or not math.isfinite(timeout_float) or not 0 < timeout_float <= 5
+                ):
+                    raise ValueError("Invalid bounded queue/response budget")
             except (ValueError, TypeError) as e:
                 error_msg = f"Invalid command parameters: {e}"
                 self.logger.error(error_msg)
@@ -296,6 +303,8 @@ class LuminaModbusServer:
                 'socket': client_socket,
                 'queued_at': time.time()
             }
+            if queue_budget is not None:
+                command_info['queue_deadline'] = time.monotonic() + queue_budget
 
             # Log received command
             command_hex = ' '.join(f'{b:02X}' for b in command_bytes)
@@ -338,11 +347,15 @@ class LuminaModbusServer:
 
                 # Check if command has exceeded its timeout (client already gave up)
                 command_age = time.time() - command_info['queued_at']
-                if command_age > command_info['timeout']:
+                expired = (time.monotonic() >= command_info['queue_deadline']
+                           if 'queue_deadline' in command_info
+                           else command_age > command_info['timeout'])
+                if expired:
                     port_logger.debug(
                         f"Skipping stale command {command_info['command_id']} "
                         f"(age: {command_age:.2f}s > timeout: {command_info['timeout']:.2f}s)"
                     )
+                    self.send_error_sync(command_info, "queue_expired")
                     self.command_queues[port].task_done()
                     continue
 
@@ -378,6 +391,8 @@ class LuminaModbusServer:
         4. Validate CRC
         5. Return raw response
         """
+        if 'queue_deadline' in command_info:
+            return self._execute_bounded_command(port, command_info)
         port_logger = self.port_loggers[port]
         baudrate = command_info['baudrate']
         command = command_info['command']
@@ -701,6 +716,74 @@ class LuminaModbusServer:
 
         port_logger.info(f"Response: {len(response)} bytes, CRC valid")
         return response
+
+    def _execute_bounded_command(self, port, info):
+        """Opt-in queued transaction: one transmission, one serial deadline.
+
+        The original six/seven-field path retains its hardware recovery logic.
+        Eight-field callers verify actuator writes with a separate readback;
+        contaminated replies fail instead of silently re-sending a write.
+        """
+        conn = self.get_serial_connection(port, info['baudrate'], info['timeout'])
+        serial_port = conn.serial_port
+        spacing = conn.min_command_spacing - (time.time() - conn.last_used)
+        if spacing > 0:
+            time.sleep(spacing)
+        if time.monotonic() >= info['queue_deadline']:
+            raise TimeoutError("queue_expired")
+        serial_port.baudrate = info['baudrate']
+        serial_port.reset_input_buffer()
+        serial_port.reset_output_buffer()
+        # Opening/configuring the tty also consumes queue time. Never send late.
+        if time.monotonic() >= info['queue_deadline']:
+            raise TimeoutError("queue_expired")
+        command = info['command']
+        deadline = time.monotonic() + info['timeout']
+        old_write_timeout = serial_port.write_timeout
+
+        def read_exact(size):
+            data = b''
+            while len(data) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("serial_response_timeout")
+                serial_port.timeout = remaining
+                chunk = serial_port.read(size - len(data))
+                if not chunk:
+                    raise TimeoutError("serial_response_timeout")
+                data += chunk
+            return data
+
+        try:
+            serial_port.write_timeout = max(0.001, deadline - time.monotonic())
+            serial_port.write(command)
+            # read() waits while the UART transmits; avoid an unbounded flush().
+            header = read_exact(3)
+            if header[0] != command[0] or header[1] not in (command[1], command[1] | 0x80):
+                raise ValueError("Unexpected slave/function in response")
+            if header[1] & 0x80:
+                response = header + read_exact(2)
+            else:
+                # Read requests can be echoed by half-duplex transceivers.
+                if command[1] in (3, 4) and header == command[:3]:
+                    echo = header + read_exact(len(command) - 3)
+                    if echo != command:
+                        raise ValueError("Contaminated request echo")
+                    header = read_exact(3)
+                response = header + read_exact(info['response_length'] - 3)
+            if response[-2:] != self._calculate_crc(response[:-2]):
+                raise ValueError("CRC mismatch in response")
+            if response[0] != command[0] or response[1] != command[1]:
+                raise ValueError("Modbus exception or unexpected response")
+            if command[1] in (3, 4) and response[2] != info['response_length'] - 5:
+                raise ValueError("Unexpected register byte count")
+            self.port_loggers[port].info(
+                f"Bounded command {info['command_id']}: response {response.hex()}, CRC valid")
+            return response
+        finally:
+            serial_port.timeout = info['timeout']
+            serial_port.write_timeout = old_write_timeout
+            conn.last_used = time.time()
 
     def _drain_serial_buffer(self, conn: SerialConnection, port_logger):
         """
