@@ -203,3 +203,34 @@ class TestProtocolEdgeCases:
         assert command_info['timeout'] == 2.0
         # Extra fields should be ignored
         assert command_info['device_type'] == 'THC'
+
+    @pytest.mark.parametrize("command_hex", ["0", "not-hex", "01 03 zz"])
+    def test_malformed_hex_never_reaches_the_serial_queue(self, mock_server, command_hex):
+        message = f"bad_hex:THC:/dev/ttyAMA0:9600:{command_hex}:8"
+
+        mock_server.process_client_message(1, message, MagicMock())
+
+        assert mock_server.command_queues['/dev/ttyAMA0'].empty()
+        assert "bad_hex" not in mock_server.client_pending_commands[1]
+        mock_server.send_error_sync.assert_called_once()
+
+    def test_unapproved_port_fails_before_command_parsing_or_queueing(self, mock_server):
+        message = "bad_port:THC:/dev/ttyUSB9:9600:not-hex:8"
+
+        mock_server.process_client_message(1, message, MagicMock())
+
+        assert all(q.empty() for q in mock_server.command_queues.values())
+        assert "bad_port" not in mock_server.client_pending_commands[1]
+        assert "Invalid port" in mock_server.send_error_sync.call_args.args[1]
+
+    def test_full_queue_returns_backpressure_without_marking_command_pending(self, mock_server):
+        full = queue.Queue(maxsize=1)
+        full.put(object())
+        mock_server.command_queues['/dev/ttyAMA0'] = full
+        message = "backpressure:THC:/dev/ttyAMA0:9600:0103000000000484:8"
+
+        mock_server.process_client_message(1, message, MagicMock())
+
+        assert full.qsize() == 1
+        assert "backpressure" not in mock_server.client_pending_commands[1]
+        assert mock_server.send_error_sync.call_args.args[1] == "queue_full"
